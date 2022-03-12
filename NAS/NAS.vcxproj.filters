@@ -19,16 +19,16 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="driver.cpp">
-      <Filter>Resource Files</Filter>
-    </ClCompile>
-  </ItemGroup>
-  <ItemGroup>
     <ClInclude Include="vdisk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="config.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="driver.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

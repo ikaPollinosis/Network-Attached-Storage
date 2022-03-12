@@ -1,5 +1,6 @@
-#pragma once
 
+
+/*
 typedef struct _CONTROLLER_DATA {
     PDEVICE_OBJECT DeviceObject;
     PUCHAR ControllerAddress;             // base addr of controller registers
@@ -75,8 +76,10 @@ typedef struct _VDSK_DEV_EXT {
 //
 #define MAXIMUM_TRANSFER_LENGTH 65536
 
+
+
 NTSTATUS
-VdiskAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT pdo) {
+VDiskAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT pdo) {
 	NTSTATUS status;
 	PDEVICE_OBJECT fdo;
 	status = IoCreateDevice(DriverObject,sizeof(VDSK_DEV_EXT), NULL, FILE_DEVICE_DISK, 0, FALSE, &fdo);
@@ -95,7 +98,7 @@ VDiskCreateClose(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
     Irp->IoStatus.Information = 0;
 
     //
-    // Complete the irp with no increase in priority 
+    // Complete the irp with no increase in priority
     //
 
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -106,3 +109,57 @@ VDiskCreateClose(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
 
     return STATUS_SUCCESS;
 }
+
+
+*/
+
+//
+//驱动卸载函数
+//
+VOID VDiskUnload(PDRIVER_OBJECT pdriver) {
+    DbgPrint("Driver Unloaded\n");
+    if (pdriver->DeviceObject) {
+        IoDeleteDevice(pdriver->DeviceObject);
+        UNICODE_STRING symname = { 0 };
+        RtlInitUnicodeString(&symname, "\\??\\VDisk");
+        IoDeleteSymbolicLink(&symname);
+    }
+}
+
+
+//
+//打开设备回调函数
+//
+NTSTATUS VDiskCreate(PDEVICE_OBJECT DeviceObject, PIRP pirp) {
+    NTSTATUS status = STATUS_SUCCESS;
+    DbgPrint("Disk has been opened\n");
+    pirp->IoStatus.Status = status;
+    pirp->IoStatus.Information = 0;
+    IoCompleteRequest(pirp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+//
+//关闭设备回调函数
+//
+NTSTATUS VDiskClose(PDEVICE_OBJECT DeviceObject, PIRP pirp) {
+    NTSTATUS status = STATUS_SUCCESS;
+    DbgPrint("Disk has been closed\n");
+    pirp->IoStatus.Status = status;
+    pirp->IoStatus.Information = 0;
+    IoCompleteRequest(pirp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+//
+//清除设备回调函数
+//
+NTSTATUS VDiskClean(PDEVICE_OBJECT DeviceObject, PIRP pirp) {
+    NTSTATUS status = STATUS_SUCCESS;
+    DbgPrint("Disk has been cleaned\n");
+    pirp->IoStatus.Status = status;
+    pirp->IoStatus.Information = 0;
+    IoCompleteRequest(pirp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+

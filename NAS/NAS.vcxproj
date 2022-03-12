@@ -181,7 +181,7 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="driver.cpp" />
+    <ClCompile Include="driver.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="config.h" />
