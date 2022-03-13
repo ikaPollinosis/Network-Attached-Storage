@@ -138,7 +138,7 @@ NTSTATUS VDiskClean(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 //
 //读写例程
 //
-NTSTATUS VDiskReadWrite(PDEVICE_OBJECT DeviceObject, PIRP irp){
+NTSTATUS VDiskReadWrite(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	PDEVICE_EXTENSION device_extension;
 	PIO_STACK_LOCATION io_stack;
 	device_extension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
@@ -163,8 +163,8 @@ NTSTATUS VDiskReadWrite(PDEVICE_OBJECT DeviceObject, PIRP irp){
 
 	IoMarkIrpPending(irp);
 
-	ExInterlockedInsertTailList(&device_extension->list_head,&irp->Tail.Overlay.ListEntry,&device_extension->list_lock);	//写入链表
-	
+	ExInterlockedInsertTailList(&device_extension->list_head, &irp->Tail.Overlay.ListEntry, &device_extension->list_lock);	//写入链表
+
 	//线程循环运行
 	KeSetEvent(
 		&device_extension->request_event,
@@ -183,13 +183,13 @@ NTSTATUS VDiskReadWrite(PDEVICE_OBJECT DeviceObject, PIRP irp){
 //
 //设备控制例程
 //
-NTSTATUS VDiskDeviceControl (PDEVICE_OBJECT DeviceObject, PIRP irp) {
+NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	PDEVICE_EXTENSION device_extension;
 	PIO_STACK_LOCATION io_stack;
 	NTSTATUS status;
 	//获取当前设备扩展
 	device_extension = DeviceObject->DeviceExtension;
-	
+
 	//获取设备栈
 	io_stack = IoGetCurrentIrpStackLocation(irp);
 
@@ -205,112 +205,112 @@ NTSTATUS VDiskDeviceControl (PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	switch (io_stack->Parameters.DeviceIoControl.IoControlCode)
 	{
 		//检查磁盘有效性的功能号,直接返回有效
-		case IOCTL_DISK_CHECK_VERIFY:
-		case IOCTL_CDROM_CHECK_VERIFY:
-		case IOCTL_STORAGE_CHECK_VERIFY:
-		case IOCTL_STORAGE_CHECK_VERIFY2:
-		{
-			status = STATUS_SUCCESS;
+	case IOCTL_DISK_CHECK_VERIFY:
+	case IOCTL_CDROM_CHECK_VERIFY:
+	case IOCTL_STORAGE_CHECK_VERIFY:
+	case IOCTL_STORAGE_CHECK_VERIFY2:
+	{
+		status = STATUS_SUCCESS;
+		irp->IoStatus.Information = 0;
+		break;
+	}
+
+	//获取物理属性功能号
+	case IOCTL_DISK_GET_DRIVE_GEOMETRY:
+	case IOCTL_CDROM_GET_DRIVE_GEOMETRY:
+	{
+		PDISK_GEOMETRY disk_geometry;
+		ULONGLONG length;
+		ULONG	sector_size = 2048;
+
+		//设备栈缓冲区过小
+		if (io_stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(DISK_GEOMETRY)) {
+			status = STATUS_BUFFER_TOO_SMALL;
 			irp->IoStatus.Information = 0;
 			break;
 		}
 
-		//获取物理属性功能号
-		case IOCTL_DISK_GET_DRIVE_GEOMETRY:
-		case IOCTL_CDROM_GET_DRIVE_GEOMETRY:
+		disk_geometry = (PDISK_GEOMETRY)irp->AssociatedIrp.SystemBuffer;
+		length = device_extension->file_information.AllocationSize.QuadPart;
+		disk_geometry->Cylinders.QuadPart = length / MM_MAXIMUM_DISK_IO_SIZE;	//磁柱
+		disk_geometry->MediaType = FixedMedia;									//媒介类型
+		disk_geometry->TracksPerCylinder = MM_MAXIMUM_DISK_IO_SIZE / PAGE_SIZE; //每个磁柱的磁道数
+		disk_geometry->SectorsPerTrack = PAGE_SIZE / sector_size;				//磁道扇区数
+		disk_geometry->BytesPerSector = sector_size;							//扇区的字节数
+
+
+		status = STATUS_SUCCESS;
+		irp->IoStatus.Information = sizeof(DISK_GEOMETRY);
+	}
+	break;
+
+	//获取分区信息功能号
+	case IOCTL_DISK_GET_PARTITION_INFO_EX:
+	{
+		PPARTITION_INFORMATION_EX   partition_information_ex;
+		ULONGLONG                   length;
+
+		if (io_stack->Parameters.DeviceIoControl.OutputBufferLength <
+			sizeof(PARTITION_INFORMATION_EX))
 		{
-			PDISK_GEOMETRY disk_geometry;
-			ULONGLONG length;
-			ULONG	sector_size=2048;
-
-			//设备栈缓冲区过小
-			if (io_stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(DISK_GEOMETRY)) {
-				status = STATUS_BUFFER_TOO_SMALL;
-				irp->IoStatus.Information = 0;
-				break;
-			}
-
-			disk_geometry = (PDISK_GEOMETRY)irp->AssociatedIrp.SystemBuffer;
-			length = device_extension->file_information.AllocationSize.QuadPart;
-			disk_geometry->Cylinders.QuadPart = length / MM_MAXIMUM_DISK_IO_SIZE;	//磁柱
-			disk_geometry->MediaType = FixedMedia;									//媒介类型
-			disk_geometry->TracksPerCylinder = MM_MAXIMUM_DISK_IO_SIZE / PAGE_SIZE; //每个磁柱的磁道数
-			disk_geometry->SectorsPerTrack = PAGE_SIZE / sector_size;				//磁道扇区数
-			disk_geometry->BytesPerSector = sector_size;							//扇区的字节数
-
-			
-			status = STATUS_SUCCESS;
-			irp->IoStatus.Information = sizeof(DISK_GEOMETRY);
+			status = STATUS_BUFFER_TOO_SMALL;
+			irp->IoStatus.Information = 0;
+			break;
 		}
+
+		partition_information_ex = (PPARTITION_INFORMATION_EX)irp->AssociatedIrp.SystemBuffer;
+
+		length = device_extension->file_information.AllocationSize.QuadPart;
+
+		partition_information_ex->PartitionStyle = PARTITION_STYLE_MBR;
+		partition_information_ex->StartingOffset.QuadPart = 0;
+		partition_information_ex->PartitionLength.QuadPart = length;
+		partition_information_ex->PartitionNumber = 0;
+		partition_information_ex->RewritePartition = FALSE;
+		partition_information_ex->Mbr.PartitionType = 0;
+		partition_information_ex->Mbr.BootIndicator = FALSE;
+		partition_information_ex->Mbr.RecognizedPartition = FALSE;
+		partition_information_ex->Mbr.HiddenSectors = 1;
+
+		status = STATUS_SUCCESS;
+		irp->IoStatus.Information = sizeof(PARTITION_INFORMATION_EX);
+
 		break;
+	}
+	case IOCTL_DISK_GET_PARTITION_INFO:
+	{
+		PPARTITION_INFORMATION  partition_information;
+		ULONGLONG               length;
 
-		//获取分区信息功能号
-		case IOCTL_DISK_GET_PARTITION_INFO_EX:
+		if (io_stack->Parameters.DeviceIoControl.OutputBufferLength <
+			sizeof(PARTITION_INFORMATION))
 		{
-			PPARTITION_INFORMATION_EX   partition_information_ex;
-			ULONGLONG                   length;
-
-			if (io_stack->Parameters.DeviceIoControl.OutputBufferLength <
-				sizeof(PARTITION_INFORMATION_EX))
-			{
-				status = STATUS_BUFFER_TOO_SMALL;
-				irp->IoStatus.Information = 0;
-				break;
-			}
-
-			partition_information_ex = (PPARTITION_INFORMATION_EX)irp->AssociatedIrp.SystemBuffer;
-
-			length = device_extension->file_information.AllocationSize.QuadPart;
-
-			partition_information_ex->PartitionStyle = PARTITION_STYLE_MBR;
-			partition_information_ex->StartingOffset.QuadPart = 0;
-			partition_information_ex->PartitionLength.QuadPart = length;
-			partition_information_ex->PartitionNumber = 0;
-			partition_information_ex->RewritePartition = FALSE;
-			partition_information_ex->Mbr.PartitionType = 0;
-			partition_information_ex->Mbr.BootIndicator = FALSE;
-			partition_information_ex->Mbr.RecognizedPartition = FALSE;
-			partition_information_ex->Mbr.HiddenSectors = 1;
-
-			status = STATUS_SUCCESS;
-			irp->IoStatus.Information = sizeof(PARTITION_INFORMATION_EX);
-
+			status = STATUS_BUFFER_TOO_SMALL;
+			irp->IoStatus.Information = 0;
 			break;
 		}
-		case IOCTL_DISK_GET_PARTITION_INFO:
-		{
-			PPARTITION_INFORMATION  partition_information;
-			ULONGLONG               length;
 
-			if (io_stack->Parameters.DeviceIoControl.OutputBufferLength <
-				sizeof(PARTITION_INFORMATION))
-			{
-				status = STATUS_BUFFER_TOO_SMALL;
-				irp->IoStatus.Information = 0;
-				break;
-			}
+		partition_information = (PPARTITION_INFORMATION)irp->AssociatedIrp.SystemBuffer;
 
-			partition_information = (PPARTITION_INFORMATION)irp->AssociatedIrp.SystemBuffer;
+		length = device_extension->file_information.AllocationSize.QuadPart;
 
-			length = device_extension->file_information.AllocationSize.QuadPart;
+		partition_information->StartingOffset.QuadPart = 0;
+		partition_information->PartitionLength.QuadPart = length;
+		partition_information->HiddenSectors = 1;
+		partition_information->PartitionNumber = 0;
+		partition_information->PartitionType = 0;
+		partition_information->BootIndicator = FALSE;
+		partition_information->RecognizedPartition = FALSE;
+		partition_information->RewritePartition = FALSE;
 
-			partition_information->StartingOffset.QuadPart = 0;
-			partition_information->PartitionLength.QuadPart = length;
-			partition_information->HiddenSectors = 1;
-			partition_information->PartitionNumber = 0;
-			partition_information->PartitionType = 0;
-			partition_information->BootIndicator = FALSE;
-			partition_information->RecognizedPartition = FALSE;
-			partition_information->RewritePartition = FALSE;
+		status = STATUS_SUCCESS;
+		irp->IoStatus.Information = sizeof(PARTITION_INFORMATION);
 
-			status = STATUS_SUCCESS;
-			irp->IoStatus.Information = sizeof(PARTITION_INFORMATION);
-
-			break;
-		}
+		break;
+	}
 	}
 
-	
+
 
 }
 
@@ -318,7 +318,7 @@ NTSTATUS VDiskDeviceControl (PDEVICE_OBJECT DeviceObject, PIRP irp) {
 //
 //读写线程
 //
-VOID VDiskThread(PVOID Context){
+VOID VDiskThread(PVOID Context) {
 	PDEVICE_OBJECT      device_object;
 	PDEVICE_EXTENSION   device_extension;
 	PLIST_ENTRY         request;
@@ -339,16 +339,16 @@ VOID VDiskThread(PVOID Context){
 	for (;;)
 	{
 		//等待处理事件请求
-		
-		KeWaitForSingleObject(&device_extension->request_event,Executive,KernelMode,FALSE,NULL);
+
+		KeWaitForSingleObject(&device_extension->request_event, Executive, KernelMode, FALSE, NULL);
 
 		if (device_extension->terminate_thread)
 		{
 			PsTerminateSystemThread(STATUS_SUCCESS);
 		}
-		
+
 		//利用锁移除链表节点，并处理读写请求
-		while (request = ExInterlockedRemoveHeadList(&device_extension->list_head,&device_extension->list_lock))
+		while (request = ExInterlockedRemoveHeadList(&device_extension->list_head, &device_extension->list_lock))
 		{
 			irp = CONTAINING_RECORD(request, IRP, Tail.Overlay.ListEntry);
 
@@ -356,7 +356,7 @@ VOID VDiskThread(PVOID Context){
 
 			switch (io_stack->MajorFunction)
 			{
-			//使用ZwReadFile读文件
+				//使用ZwReadFile读文件
 			case IRP_MJ_READ:
 				ZwReadFile(device_extension->file_handle, NULL, NULL, NULL, &irp->IoStatus,
 					MmGetSystemAddressForMdlSafe(irp->MdlAddress, NormalPagePriority),
@@ -388,12 +388,12 @@ VOID VDiskThread(PVOID Context){
 	}
 }
 
-NTSTATUS 
+NTSTATUS
 DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 {
 
-	NTSTATUS status=STATUS_SUCCESS;
-	
+	NTSTATUS status = STATUS_SUCCESS;
+
 	//
 	//驱动开始运行
 	//
@@ -407,7 +407,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 
 
 
-	
+
 
 
 
@@ -417,7 +417,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	PDEVICE_OBJECT pdevice = NULL;
 	status = IoCreateDevice(DriverObject, sizeof(DEVICE_EXTENSION),
 		&devicename, FILE_DEVICE_DISK, 0, FALSE, &pdevice);
-	if (!NT_SUCCESS(status)) { 
+	if (!NT_SUCCESS(status)) {
 		DbgPrint("Create Device Failed:%x\n", status);
 		return status;
 	}
