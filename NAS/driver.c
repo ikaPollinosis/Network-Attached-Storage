@@ -18,6 +18,16 @@
 #define IOCTL_FILE_DISK_QUERY_FILE  CTL_CODE(FILE_DEVICE_DISK, 0x802, METHOD_BUFFERED, FILE_READ_ACCESS)
 
 
+//
+//网络指令结构体，使用TDI实现内核级网络通信
+//
+struct CDISK {
+	ULONG CDType;	//标识指令具体类型
+	ULONG Start;	//块的起始扇区号
+	ULONG Counts;	//块的扇区数
+	ULONG Time;		//指令发出时间	
+};
+
 
 typedef enum _TOKEN_TYPE {
 	TokenPrimary = 1,
@@ -215,6 +225,7 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 			break;
 		}
 
+
 		//获取物理属性功能号
 		case IOCTL_DISK_GET_DRIVE_GEOMETRY:
 		case IOCTL_CDROM_GET_DRIVE_GEOMETRY:
@@ -244,6 +255,8 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 
 			break;
 		}
+
+
 		//获取分区信息功能号
 		case IOCTL_DISK_GET_PARTITION_INFO_EX:
 		{
@@ -308,9 +321,67 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 
 			break;
 		}
+
+		//检测磁盘是否为只读
+		case IOCTL_DISK_IS_WRITABLE:
+		{
+			if (!device_extension->read_only)
+			{
+				status = STATUS_SUCCESS;
+			}
+			else
+			{
+				status = STATUS_MEDIA_WRITE_PROTECTED;
+			}
+			irp->IoStatus.Information = 0;
+			break;
+		}
+
+		case IOCTL_DISK_MEDIA_REMOVAL:
+
+		//设置磁盘分区信息
+		case IOCTL_DISK_SET_PARTITION_INFO:
+		{
+			if (device_extension->read_only)
+			{
+				status = STATUS_MEDIA_WRITE_PROTECTED;
+				irp->IoStatus.Information = 0;
+				break;
+			}
+
+			if (io_stack->Parameters.DeviceIoControl.InputBufferLength <
+				sizeof(SET_PARTITION_INFORMATION))
+			{
+				status = STATUS_INVALID_PARAMETER;
+				irp->IoStatus.Information = 0;
+				break;
+			}
+
+			status = STATUS_SUCCESS;
+			irp->IoStatus.Information = 0;
+
+			break;
+		}
+
+		//对未知操作码
+		default:
+		{
+			KdPrint((
+				"FileDisk: Unknown IoControlCode %#x\n",
+				io_stack->Parameters.DeviceIoControl.IoControlCode
+				));
+
+			status = STATUS_INVALID_DEVICE_REQUEST;
+			irp->IoStatus.Information = 0;
+		}
 	}
-	
+
 }
+
+
+
+	
+
 
 
 //
