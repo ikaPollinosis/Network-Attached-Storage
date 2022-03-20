@@ -4,6 +4,7 @@
 #include <ntddcdrm.h>
 #include <ntverp.h>
 #include <wdmsec.h>
+#include <wsk.h>
 
 #define DEVICE_NAME			L"\\Device\\VDisk"		//设备名
 #define SYM_NAME			L"\\??\\VDisk"			//符号连接
@@ -18,15 +19,226 @@
 #define IOCTL_FILE_DISK_QUERY_FILE  CTL_CODE(FILE_DEVICE_DISK, 0x802, METHOD_BUFFERED, FILE_READ_ACCESS)
 
 
-//
-//网络指令结构体，使用TDI实现内核级网络通信
-//
-struct CDISK {
-	ULONG CDType;	//标识指令具体类型
-	ULONG Start;	//块的起始扇区号
-	ULONG Counts;	//块的扇区数
-	ULONG Time;		//指令发出时间	
+
+
+const WSK_CLIENT_DISPATCH WskAppDispatch = {
+  MAKE_WSK_VERSION(1,0),
+  0,
+  NULL 
 };
+
+WSK_REGISTRATION WskRegistration;
+
+
+
+
+//套接字上下文
+typedef struct _WSK_APP_SOCKET_CONTEXT {
+	PWSK_SOCKET Socket;
+} WSK_APP_SOCKET_CONTEXT, * PWSK_APP_SOCKET_CONTEXT;
+
+WSK_APP_SOCKET_CONTEXT socketcontext;
+
+
+//创建新的面向连接套接字
+NTSTATUS
+CreateConnectionSocket(
+	PWSK_PROVIDER_NPI WskProviderNpi,
+	PWSK_APP_SOCKET_CONTEXT SocketContext,
+	PWSK_CLIENT_LISTEN_DISPATCH Dispatch
+	)
+{
+	PIRP Irp;
+	NTSTATUS Status;
+
+	//分配Irp
+	Irp =
+		IoAllocateIrp(
+			1,
+			FALSE
+		);
+	//Irp分配失败
+	if (!Irp)
+	{
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	//创建套接字
+	Status =
+		WskProviderNpi->Dispatch->
+		WskSocket(
+			WskProviderNpi->Client,
+			AF_INET,
+			SOCK_STREAM,
+			IPPROTO_TCP,
+			WSK_FLAG_CONNECTION_SOCKET,
+			SocketContext,
+			Dispatch,
+			NULL,
+			NULL,
+			NULL,
+			Irp
+		);
+
+	return Status;
+}
+
+
+
+//捕获WSK提供程序的NPI，并使用NPI创建套接字
+NTSTATUS
+WskAppWorkerRoutine(
+)
+{
+	NTSTATUS Status;
+	WSK_PROVIDER_NPI wskProviderNpi;
+
+	//若WSK子系统没有就绪则等待
+	Status = WskCaptureProviderNPI(
+		&WskRegistration,
+		WSK_INFINITE_WAIT,
+		&wskProviderNpi
+	);
+
+	if (!NT_SUCCESS(Status))
+	{
+		//若NPI无法捕获
+		if (Status == STATUS_NOINTERFACE) {
+			//WSK版本不支持
+			DbgPrint(" WSK application's requested version is not supported\n");
+		}
+		else if (Status == STATUS_DEVICE_NOT_READY) {
+			DbgPrint("WskDeregister was invoked in another thread\n");
+		}
+		else {
+			DbgPrint("Some other unexpected failure has occurred\n");
+		}
+
+		return Status;
+	}
+
+	//获取到NPI，建立套接字
+	Status = CreateConnectionSocket(&wskProviderNpi,&socketcontext,socketcontext.Socket->Dispatch);
+
+	WskReleaseProviderNPI(&WskRegistration);
+	return Status;
+
+}
+
+
+
+//
+//使用WSK传输数据
+//
+NTSTATUS SendData(PWSK_SOCKET Socket, PWSK_BUF DataBuffer)
+{
+	PWSK_PROVIDER_CONNECTION_DISPATCH Dispatch;
+	PIRP Irp;
+	NTSTATUS Status;
+
+	Dispatch = (PWSK_PROVIDER_CONNECTION_DISPATCH)(Socket->Dispatch);
+
+	//分配IRP
+	Irp =
+		IoAllocateIrp(
+			1,
+			FALSE
+		);
+
+	//检查分配是否成功
+	if (!Irp)
+	{
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+
+	//初始化传输操作
+	Status =
+		Dispatch->WskSend(
+			Socket,
+			DataBuffer,
+			0,
+			Irp
+		);
+
+	//返回WskSend函数的结果
+	return Status;
+}
+
+
+NTSTATUS
+ConnectComplete(
+	PDEVICE_OBJECT DeviceObject,
+	PIRP Irp,
+	PVOID Context
+)
+{
+	UNREFERENCED_PARAMETER(DeviceObject);
+
+	PWSK_SOCKET Socket;
+
+	// Check the result of the connect operation
+	if (Irp->IoStatus.Status == STATUS_SUCCESS)
+	{
+		// Get the socket object from the context
+		Socket = (PWSK_SOCKET)Context;
+	}
+
+	IoFreeIrp(Irp);
+
+	return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+//使用WskConnect连接远程地址
+NTSTATUS
+ConnectSocket(
+	PWSK_SOCKET Socket,
+	PSOCKADDR RemoteAddress
+)
+{
+	PWSK_PROVIDER_CONNECTION_DISPATCH Dispatch;
+	PIRP Irp;
+	NTSTATUS Status;
+
+	//获得分发指针
+	Dispatch =
+		(PWSK_PROVIDER_CONNECTION_DISPATCH)(Socket->Dispatch);
+
+	//分配IRP
+	Irp =
+		IoAllocateIrp(
+			1,
+			FALSE
+		);
+
+	if (!Irp)
+	{
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	IoSetCompletionRoutine(
+		Irp,
+		ConnectComplete,
+		Socket,
+		TRUE,
+		TRUE,
+		TRUE
+	);
+
+	//初始化连接
+	Status =
+		Dispatch->WskConnect(
+			Socket,
+			RemoteAddress,
+			0,
+			Irp
+		);
+
+	return Status;
+}
+
+
+
 
 
 typedef enum _TOKEN_TYPE {
@@ -462,7 +674,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 {
 
 	NTSTATUS status = STATUS_SUCCESS;
-
+	WSK_CLIENT_NPI wskClientNpi;
 	//
 	//驱动开始运行
 	//
@@ -475,10 +687,40 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	RtlInitUnicodeString(&devicename, DEVICE_NAME);
 
 
+	//
+	//注册wsk应用程序
+	//
+	wskClientNpi.ClientContext = NULL;
+	wskClientNpi.Dispatch = &WskAppDispatch;
+	status = WskRegister(&wskClientNpi, &WskRegistration);
+	if (!NT_SUCCESS(status)) {
+		DbgPrint("Register Wsk Failed:%x\n", status);
+		return status;
+	}
+
+	//
+	//创建套接字
+	//
+	status = WskAppWorkerRoutine();
+	if (!NT_SUCCESS(status)) {
+		DbgPrint("Create Socket Failed:%x\n", status);
+		return status;
+	}
 
 
+	//
+	//与目标建立连接
+	//
+	SOCKADDR_IN addr;
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(800);
+	addr.sin_addr.s_addr = inet_addr("192.168.1.0");
 
-
+	status = ConnectSocket(socketcontext.Socket, (PSOCKADDR)&addr);
+	if (!NT_SUCCESS(status)) {
+		DbgPrint("Connect to Server Failed:%x\n", status);
+		return status;
+	}
 
 	//
 	//创建设备
@@ -509,6 +751,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 		return status;
 	}
 
+	
 
 
 	//
