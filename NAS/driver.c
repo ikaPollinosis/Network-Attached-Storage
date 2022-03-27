@@ -5,19 +5,17 @@
 #include <ntverp.h>
 #include <wdmsec.h>
 #include <wsk.h>
+#include "vdisk.h"
+
 
 #define DEVICE_NAME			L"\\Device\\VDisk"		//设备名
 #define SYM_NAME			L"\\??\\VDisk"			//符号连接
 
 #define TOKEN_SOURCE_LENGTH 8
 
+#define BUFFER_SIZE             (4096 * 4)
 
-
-//设置自定义功能号
-#define IOCTL_FILE_DISK_OPEN_FILE   CTL_CODE(FILE_DEVICE_DISK, 0x800, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
-#define IOCTL_FILE_DISK_CLOSE_FILE  CTL_CODE(FILE_DEVICE_DISK, 0x801, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
-#define IOCTL_FILE_DISK_QUERY_FILE  CTL_CODE(FILE_DEVICE_DISK, 0x802, METHOD_BUFFERED, FILE_READ_ACCESS)
-
+#define NET_DISK_POOL_TAG      'ksiD'
 
 
 
@@ -130,7 +128,8 @@ WskAppWorkerRoutine(
 //
 //使用WSK传输数据
 //
-NTSTATUS SendData(PWSK_SOCKET Socket, PWSK_BUF DataBuffer)
+NTSTATUS 
+SendData(PWSK_SOCKET Socket, PWSK_BUF DataBuffer)
 {
 	PWSK_PROVIDER_CONNECTION_DISPATCH Dispatch;
 	PIRP Irp;
@@ -271,6 +270,13 @@ typedef struct _SECURITY_CLIENT_CONTEXT {
 	TOKEN_CONTROL               ClientTokenControl;
 } SECURITY_CLIENT_CONTEXT, * PSECURITY_CLIENT_CONTEXT;
 
+
+
+typedef struct _NET_HEADER {
+	LARGE_INTEGER ContentLength;
+} NET_HEADER, * PNET_HEADER;
+
+
 //设备扩展
 typedef struct _DEVICE_EXTENSION {
 	BOOLEAN							media_in_device;			//是否连接物理媒介
@@ -283,13 +289,24 @@ typedef struct _DEVICE_EXTENSION {
 	KEVENT							request_event;				//处理链表请求事件
 	PVOID							thread_pointer;				//线程指针
 	BOOLEAN							terminate_thread;			//是否终止线程
+	UNICODE_STRING					device_name;
+	ULONG							device_number;
+	DEVICE_TYPE						device_type;
+	ULONG							address;
+	USHORT							port;
+	PUCHAR							host_name;
+	PUCHAR							file_name;
+	LARGE_INTEGER					file_size;
+	INT_PTR							socket;
+
 }DEVICE_EXTENSION, * PDEVICE_EXTENSION;
 
 
 //
 //删除设备
 //
-VOID VDiskDeleteDevice(PDEVICE_OBJECT pdevice) {
+VOID 
+VDiskDeleteDevice(PDEVICE_OBJECT pdevice) {
 	PDEVICE_EXTENSION   device_extension;
 	PDEVICE_OBJECT      next_device_object;
 	// 得到设备扩展
@@ -319,7 +336,8 @@ VOID VDiskDeleteDevice(PDEVICE_OBJECT pdevice) {
 //
 //驱动卸载例程
 //
-VOID VDiskUnload(PDRIVER_OBJECT pdriver) {
+VOID 
+VDiskUnload(PDRIVER_OBJECT pdriver) {
 	DbgPrint("Driver Unloaded\n");
 
 	//若设备存在则进行删除
@@ -337,7 +355,8 @@ VOID VDiskUnload(PDRIVER_OBJECT pdriver) {
 //
 //创建、关闭设备例程
 //
-NTSTATUS VDiskCreateClose(PDEVICE_OBJECT DeviceObject, PIRP irp) {
+NTSTATUS 
+VDiskCreateClose(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	//PAGED_CODE();		调试使用的宏
 	irp->IoStatus.Status = STATUS_SUCCESS;
 	irp->IoStatus.Information = FILE_OPENED;
@@ -348,7 +367,8 @@ NTSTATUS VDiskCreateClose(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 //
 //清除设备例程
 //
-NTSTATUS VDiskClean(PDEVICE_OBJECT DeviceObject, PIRP irp) {
+NTSTATUS 
+VDiskClean(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	NTSTATUS status = STATUS_SUCCESS;
 	DbgPrint("Disk has been cleaned\n");
 	irp->IoStatus.Status = status;
@@ -360,16 +380,21 @@ NTSTATUS VDiskClean(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 //
 //读写例程
 //
-NTSTATUS VDiskReadWrite(PDEVICE_OBJECT DeviceObject, PIRP irp) {
+NTSTATUS 
+VDiskReadWrite(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	PDEVICE_EXTENSION device_extension;
 	PIO_STACK_LOCATION io_stack;
+
+
 	device_extension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
 	//检查是否连接了物理设备
 	if (!device_extension->media_in_device)
 	{
 		irp->IoStatus.Status = STATUS_NO_MEDIA_IN_DEVICE;
 		irp->IoStatus.Information = 0;
+
 		IoCompleteRequest(irp, IO_NO_INCREMENT);
+
 		return STATUS_NO_MEDIA_IN_DEVICE;
 	}
 	//获取irp当前栈空间
@@ -385,7 +410,10 @@ NTSTATUS VDiskReadWrite(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 
 	IoMarkIrpPending(irp);
 
-	ExInterlockedInsertTailList(&device_extension->list_head, &irp->Tail.Overlay.ListEntry, &device_extension->list_lock);	//写入链表
+	ExInterlockedInsertTailList(&device_extension->list_head,
+		&irp->Tail.Overlay.ListEntry,
+		&device_extension->list_lock
+	);	//写入链表
 
 	//线程循环运行
 	KeSetEvent(
@@ -426,6 +454,79 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	//根据不同功能号进行设备控制
 	switch (io_stack->Parameters.DeviceIoControl.IoControlCode)
 	{
+
+		//连接、断开连接处理
+	case IOCTL_DISK_CONNECT:
+	{
+		if (device_extension->media_in_device)
+		{
+			DbgPrint("HttpDisk: IOCTL_DISK_CONNECT: Media already connected.\n");
+
+			status = STATUS_INVALID_DEVICE_REQUEST;
+			irp->IoStatus.Information = 0;
+			break;
+		}
+
+		if (io_stack->Parameters.DeviceIoControl.InputBufferLength <
+			sizeof(NET_DISK_INFORMATION))
+		{
+			status = STATUS_INVALID_PARAMETER;
+			irp->IoStatus.Information = 0;
+			break;
+		}
+
+		if (io_stack->Parameters.DeviceIoControl.InputBufferLength <
+			sizeof(NET_DISK_INFORMATION) +
+			((PNET_DISK_INFORMATION)irp->AssociatedIrp.SystemBuffer)->FileNameLength -
+			sizeof(UCHAR))
+		{
+			status = STATUS_INVALID_PARAMETER;
+			irp->IoStatus.Information = 0;
+			break;
+		}
+
+		IoMarkIrpPending(irp);
+
+		ExInterlockedInsertTailList(
+			&device_extension->list_head,
+			&irp->Tail.Overlay.ListEntry,
+			&device_extension->list_lock
+		);
+
+		KeSetEvent(
+			&device_extension->request_event,
+			(KPRIORITY)0,
+			FALSE
+		);
+
+		status = STATUS_PENDING;
+
+		break;
+	}
+
+	case IOCTL_DISK_DISCONNECT:
+	{
+		IoMarkIrpPending(irp);
+
+		ExInterlockedInsertTailList(
+			&device_extension->list_head,
+			&irp->Tail.Overlay.ListEntry,
+			&device_extension->list_lock
+		);
+
+		KeSetEvent(
+			&device_extension->request_event,
+			(KPRIORITY)0,
+			FALSE
+		);
+
+		status = STATUS_PENDING;
+
+		break;
+	}
+
+
+
 		//检查磁盘有效性的功能号,直接返回有效
 		case IOCTL_DISK_CHECK_VERIFY:
 		case IOCTL_CDROM_CHECK_VERIFY:
@@ -468,6 +569,28 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 			break;
 		}
 
+
+		case IOCTL_DISK_GET_LENGTH_INFO:
+		{
+			PGET_LENGTH_INFORMATION get_length_information;
+
+			if (io_stack->Parameters.DeviceIoControl.OutputBufferLength <
+				sizeof(GET_LENGTH_INFORMATION))
+			{
+				status = STATUS_BUFFER_TOO_SMALL;
+				irp->IoStatus.Information = 0;
+				break;
+			}
+
+			get_length_information = (PGET_LENGTH_INFORMATION)irp->AssociatedIrp.SystemBuffer;
+
+			get_length_information->Length.QuadPart = device_extension->file_size.QuadPart;
+
+			status = STATUS_SUCCESS;
+			irp->IoStatus.Information = sizeof(GET_LENGTH_INFORMATION);
+
+			break;
+		}
 
 		//获取分区信息功能号
 		case IOCTL_DISK_GET_PARTITION_INFO_EX:
@@ -591,6 +714,17 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 }
 
 
+NTSTATUS
+NetDiskConnect(IN PDEVICE_OBJECT   DeviceObject,IN PIRP	irp)
+{
+}
+
+
+
+NTSTATUS
+HttpDiskDisconnect(IN PDEVICE_OBJECT DeviceObject,IN PIRP irp)
+{
+}
 
 	
 
@@ -629,7 +763,7 @@ VOID VDiskThread(PVOID Context) {
 		}
 
 		//利用锁移除链表节点，并处理读写请求
-		while (request = ExInterlockedRemoveHeadList(&device_extension->list_head, &device_extension->list_lock))
+		while ((request = ExInterlockedRemoveHeadList(&device_extension->list_head, &device_extension->list_lock))!=NULL)
 		{
 			irp = CONTAINING_RECORD(request, IRP, Tail.Overlay.ListEntry);
 
@@ -714,7 +848,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	SOCKADDR_IN addr;
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(800);
-	addr.sin_addr.s_addr = inet_addr("192.168.1.0");
+	addr.sin_addr.s_addr = inet_addr("192.168.43.59");
 
 	status = ConnectSocket(socketcontext.Socket, (PSOCKADDR)&addr);
 	if (!NT_SUCCESS(status)) {
