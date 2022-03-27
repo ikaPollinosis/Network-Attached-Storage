@@ -722,7 +722,7 @@ NetDiskConnect(IN PDEVICE_OBJECT   DeviceObject,IN PIRP	irp)
 
 
 NTSTATUS
-HttpDiskDisconnect(IN PDEVICE_OBJECT DeviceObject,IN PIRP irp)
+NetDiskDisconnect(IN PDEVICE_OBJECT DeviceObject,IN PIRP irp)
 {
 }
 
