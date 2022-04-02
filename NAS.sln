@@ -5,6 +5,8 @@ VisualStudioVersion = 16.0.32126.315
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "NAS", "NAS\NAS.vcxproj", "{02019ED8-355C-4510-A14F-4D1DE0C88FF3}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VDiskConsole", "VDiskConsole\VDiskConsole.vcxproj", "{D495BF64-F965-4901-AE2B-9EC0023323D4}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|ARM = Debug|ARM
@@ -41,6 +43,18 @@ Global
 		{02019ED8-355C-4510-A14F-4D1DE0C88FF3}.Release|x86.ActiveCfg = Release|Win32
 		{02019ED8-355C-4510-A14F-4D1DE0C88FF3}.Release|x86.Build.0 = Release|Win32
 		{02019ED8-355C-4510-A14F-4D1DE0C88FF3}.Release|x86.Deploy.0 = Release|Win32
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Debug|ARM.ActiveCfg = Debug|Win32
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Debug|ARM64.ActiveCfg = Debug|Win32
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Debug|x64.ActiveCfg = Debug|x64
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Debug|x64.Build.0 = Debug|x64
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Debug|x86.ActiveCfg = Debug|Win32
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Debug|x86.Build.0 = Debug|Win32
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Release|ARM.ActiveCfg = Release|Win32
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Release|ARM64.ActiveCfg = Release|Win32
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Release|x64.ActiveCfg = Release|x64
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Release|x64.Build.0 = Release|x64
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Release|x86.ActiveCfg = Release|Win32
+		{D495BF64-F965-4901-AE2B-9EC0023323D4}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
