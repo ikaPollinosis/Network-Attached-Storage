@@ -33,6 +33,8 @@
 
 HANDLE dir_handle;
 
+__int64 __cdecl _atoi64(const char*);
+
 //
 //例程声明
 //
@@ -55,24 +57,17 @@ HttpGetHeader(
 
 NTSTATUS
 HttpGetBlock(
+	IN INT_PTR* Socket,
 	IN ULONG                Address,
 	IN USHORT               Port,
 	IN PUCHAR               HostName,
 	IN PUCHAR               FileName,
+	IN PLARGE_INTEGER       Offset,
+	IN ULONG                Length,
 	OUT PIO_STATUS_BLOCK    IoStatus,
-	OUT PHTTP_HEADER        HttpHeader
+	OUT PVOID               SystemBuffer
 );
 
-
-
-
-const WSK_CLIENT_DISPATCH WskAppDispatch = {
-  MAKE_WSK_VERSION(1,0),
-  0,
-  NULL 
-};
-
-WSK_REGISTRATION WskRegistration;
 
 
 typedef struct _HTTP_HEADER {
@@ -99,15 +94,15 @@ typedef struct _DEVICE_EXTENSION {
 	KEVENT							request_event;				//处理链表请求事件
 	PVOID							thread_pointer;				//线程指针
 	BOOLEAN							terminate_thread;			//是否终止线程
-	UNICODE_STRING					device_name;
-	ULONG							device_number;
-	DEVICE_TYPE						device_type;
-	ULONG							address;
-	USHORT							port;
-	PUCHAR							host_name;
-	PUCHAR							file_name;
-	LARGE_INTEGER					file_size;
-	INT_PTR							socket;
+	UNICODE_STRING					device_name;				//设备名
+	ULONG							device_number;				//设备号
+	DEVICE_TYPE						device_type;				//设备类型
+	ULONG							address;					//IP地址
+	USHORT							port;						//端口
+	PUCHAR							host_name;					//主机名
+	PUCHAR							file_name;					//磁盘映像文件名
+	LARGE_INTEGER					file_size;					//映像大小
+	INT_PTR							socket;						//设备对应的套接字
 
 }DEVICE_EXTENSION, * PDEVICE_EXTENSION;
 
@@ -187,18 +182,7 @@ VDiskCreateClose(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	return STATUS_SUCCESS;
 }
 
-//
-//清除设备例程
-//
-NTSTATUS 
-VDiskClean(PDEVICE_OBJECT DeviceObject, PIRP irp) {
-	NTSTATUS status = STATUS_SUCCESS;
-	DbgPrint("Disk has been cleaned\n");
-	irp->IoStatus.Status = status;
-	irp->IoStatus.Information = 0;
-	IoCompleteRequest(irp, IO_NO_INCREMENT);
-	return STATUS_SUCCESS;
-}
+
 
 //
 //读写例程
@@ -553,6 +537,7 @@ NetDiskConnect(IN PDEVICE_OBJECT   DeviceObject,IN PIRP	irp)
 	ASSERT(DeviceObject != NULL);
 	ASSERT(irp != NULL);
 
+	//设置服务器地址和端口
 	device_extension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
 
 	http_disk_information = (PNET_DISK_INFORMATION)irp->AssociatedIrp.SystemBuffer;
@@ -598,7 +583,7 @@ NetDiskConnect(IN PDEVICE_OBJECT   DeviceObject,IN PIRP	irp)
 	);
 
 	device_extension->file_name[http_disk_information->FileNameLength] = '\0';
-
+	//获取资源信息
 	HttpGetHeader(
 		device_extension->address,
 		device_extension->port,
@@ -608,6 +593,7 @@ NetDiskConnect(IN PDEVICE_OBJECT   DeviceObject,IN PIRP	irp)
 		&http_header
 	);
 
+	//获取资源信息失败，重试
 	if (!NT_SUCCESS(irp->IoStatus.Status))
 	{
 		DbgPrint("retrying get header\n");
@@ -621,9 +607,10 @@ NetDiskConnect(IN PDEVICE_OBJECT   DeviceObject,IN PIRP	irp)
 		);
 	}
 
+	//失败，显示错误并释放资源
 	if (!NT_SUCCESS(irp->IoStatus.Status))
 	{
-		DbgPrint("HttpDisk: get header failed\n");
+		DbgPrint("get header failed\n");
 
 		if (device_extension->host_name != NULL)
 		{
@@ -665,7 +652,8 @@ NetDiskDisconnect(IN PDEVICE_OBJECT DeviceObject,IN PIRP irp)
 	device_extension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
 
 	device_extension->media_in_device = FALSE;
-
+	
+	//释放资源
 	if (device_extension->host_name != NULL)
 	{
 		ExFreePool(device_extension->host_name);
@@ -691,8 +679,535 @@ NetDiskDisconnect(IN PDEVICE_OBJECT DeviceObject,IN PIRP irp)
 }
 
 	
+//
+//获取资源信息
+//
+NTSTATUS
+HttpGetHeader(
+	IN ULONG                Address,
+	IN USHORT               Port,
+	IN PUCHAR               HostName,
+	IN PUCHAR               FileName,
+	OUT PIO_STATUS_BLOCK    IoStatus,
+	OUT PHTTP_HEADER        HttpHeader
+)
+{
+	INT_PTR             kSocket;
+	struct sockaddr_in  toAddr;
+	int                 status, nSent, nRecv;
+	char* request, * buffer, * pStr;
+
+	PAGED_CODE();
+
+	ASSERT(HostName != NULL);
+	ASSERT(FileName != NULL);
+	ASSERT(IoStatus != NULL);
+	ASSERT(HttpHeader != NULL);
+
+	request = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE, NET_DISK_POOL_TAG);
+
+	if (request == NULL)
+	{
+		IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
+		return IoStatus->Status;
+	}
+
+	buffer = ExAllocatePoolWithTag(PagedPool, BUFFER_SIZE, NET_DISK_POOL_TAG);
+
+	if (buffer == NULL)
+	{
+		ExFreePool(request);
+		IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
+		return IoStatus->Status;
+	}
+
+	kSocket = socket(AF_INET, SOCK_STREAM, 0);
+
+	if (kSocket == -1)
+	{
+		KdPrint(("get header : socket() returned - 1\n"));
+		ExFreePool(request);
+		ExFreePool(buffer);
+		IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
+		return IoStatus->Status;
+	}
+
+	toAddr.sin_family = AF_INET;
+	toAddr.sin_port = Port;
+	toAddr.sin_addr.s_addr = Address;
+
+	status = connect(kSocket, (struct sockaddr*)&toAddr, sizeof(toAddr));
+
+	if (status < 0)
+	{
+		KdPrint(("get header: connect() error: %#x\n", status));
+		ExFreePool(request);
+		ExFreePool(buffer);
+		close(kSocket);
+		IoStatus->Status = status;
+		return IoStatus->Status;
+	}
+
+	//创建Http请求
+	RtlStringCbPrintfA(
+		request,
+		PAGE_SIZE,
+		"HEAD %s HTTP/1.1\r\nHost: %s\r\nAccept: */*\r\nUser-Agent: HttpDisk/10.2\r\nConnection: close\r\n\r\n",
+		FileName,
+		HostName
+	);
+
+	//发送Http请求
+	nSent = send(kSocket, request, (int)strlen(request), 0);
+
+	if (nSent < 0)
+	{
+		//发送失败，释放资源
+		KdPrint(("get header: send() error: %#x\n", nSent));
+		ExFreePool(request);
+		ExFreePool(buffer);
+		close(kSocket);
+		IoStatus->Status = nSent;
+		return IoStatus->Status;
+	}
+	if (nSent < (int)strlen(request))
+	{
+		//请求没有正确发送
+		KdPrint(("get header: send() did not complete: %d < %d\n", nSent, (int)strlen(request)));
+	}
+
+	//接收服务器的返回报文
+	nRecv = recv(kSocket, buffer, BUFFER_SIZE, 0);
+
+	if (nRecv <= 0)
+	{
+		if (nRecv == 0)
+		{
+			//服务器连接断开，没有收到返回
+			KdPrint(("get header: server disconnected\n"));
+			IoStatus->Status = STATUS_NO_SUCH_FILE;
+		}
+		else
+		{
+			//接收错误
+			KdPrint(("get header: recv() error: %#x\n", nRecv));
+			IoStatus->Status = nRecv;
+		}
+		//接收报文失败，释放资源
+		ExFreePool(request);
+		ExFreePool(buffer);
+		close(kSocket);
+		return IoStatus->Status;
+	}
+
+	close(kSocket);
+
+	buffer[BUFFER_SIZE - 1] = '\0';
+
+	KdPrint(("get header HTTP response:\n"
+		"-----------------------------------\n"
+		"%.*s"
+		"-----------------------------------\n",
+		nRecv - 2, buffer
+		));
+
+	if (_strnicmp(buffer, "HTTP/1.1 200 OK", 15))
+	{
+		//收到的回复不成功
+		if (_strnicmp(buffer, "HTTP/1.1 404 Not Found", 22))
+		{
+			//除404文件不存在的其他错误
+			KdPrint(("get header error: other error than \'file not found\'\n"));
+		}
+		else
+		{
+			//404文件不存在
+			KdPrint(("get header: file not found\n"));
+		}
+		ExFreePool(request);
+		ExFreePool(buffer);
+		IoStatus->Status = STATUS_NO_SUCH_FILE;
+		return IoStatus->Status;
+	}
+
+	pStr = strstr(buffer, "Content-Length:");
+
+	if (pStr == NULL || pStr + 16 >= buffer + BUFFER_SIZE)
+	{
+		KdPrint(("get header error: field \'Content-Length\' not found\n"));
+		ExFreePool(request);
+		ExFreePool(buffer);
+		IoStatus->Status = STATUS_NO_SUCH_FILE;
+		return IoStatus->Status;
+	}
+
+	HttpHeader->ContentLength.QuadPart = _atoi64(pStr + 16);
+
+	if (HttpHeader->ContentLength.QuadPart == 0)
+	{
+		KdPrint(("get header error: field \'Content-Length\' not interpreted correctly\n"));
+		ExFreePool(request);
+		ExFreePool(buffer);
+		IoStatus->Status = STATUS_NO_SUCH_FILE;
+		return IoStatus->Status;
+	}
+
+	ExFreePool(request);
+	ExFreePool(buffer);
+
+	IoStatus->Status = STATUS_SUCCESS;
+	IoStatus->Information = 0;
+
+	return STATUS_SUCCESS;
+}
 
 
+
+
+
+//
+//获取磁盘块
+//
+NTSTATUS
+HttpGetBlock(
+	IN INT_PTR				*Socket,
+	IN ULONG                Address,
+	IN USHORT               Port,
+	IN PUCHAR               HostName,
+	IN PUCHAR               FileName,
+	IN PLARGE_INTEGER       Offset,
+	IN ULONG                Length,
+	OUT PIO_STATUS_BLOCK    IoStatus,
+	OUT PVOID               SystemBuffer
+)
+{
+	struct sockaddr_in  toAddr;
+	int                 status, nSent, nRecv;
+	unsigned int        dataLen;
+	char* request, * buffer, * pDataPart;
+
+	PAGED_CODE();
+
+	//检测参数是否为空
+	ASSERT(Socket != NULL);
+	ASSERT(HostName != NULL);
+	ASSERT(FileName != NULL);
+	ASSERT(Offset != NULL);
+	ASSERT(IoStatus != NULL);
+	ASSERT(SystemBuffer != NULL);
+
+	IoStatus->Information = 0;
+
+	request = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE, NET_DISK_POOL_TAG);
+
+	if (request == NULL)
+	{
+		IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
+		return IoStatus->Status;
+	}
+
+	buffer = ExAllocatePoolWithTag(PagedPool, BUFFER_SIZE + 1, NET_DISK_POOL_TAG);
+
+	if (buffer == NULL)
+	{
+		ExFreePool(request);
+		IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
+		return IoStatus->Status;
+	}
+
+
+	//创建HTTP请求报文
+	RtlStringCbPrintfA(
+		request,
+		PAGE_SIZE,
+		"GET %s HTTP/1.1\r\nHost: %s\r\nRange: bytes=%I64u-%I64u\r\nAccept: */*\r\nUser-Agent: HttpDisk/10.2\r\n\r\n",
+		FileName,
+		HostName,
+		Offset->QuadPart,
+		Offset->QuadPart + Length - 1
+	);
+
+	//创建套接字
+	if (*Socket == -1)
+	{
+		*Socket = socket(AF_INET, SOCK_STREAM, 0);
+		if (*Socket == -1)
+		{
+			KdPrint(("get block: socket() returned -1\n"));
+			ExFreePool(request);
+			ExFreePool(buffer);
+			IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
+			return IoStatus->Status;
+		}
+
+		toAddr.sin_family = AF_INET;
+		toAddr.sin_port = Port;
+		toAddr.sin_addr.s_addr = Address;
+
+
+		//连接Http服务器
+		status = connect(*Socket, (struct sockaddr*)&toAddr, sizeof(toAddr));
+
+		if (status < 0)
+		{
+			KdPrint(("get block: connect() error: %#x\n", status));
+			ExFreePool(request);
+			ExFreePool(buffer);
+			close(*Socket);
+			*Socket = -1;
+			IoStatus->Status = status;
+			return IoStatus->Status;
+		}
+	}
+
+	//向服务器发送请求报文，请求对应的块
+	nSent = send(*Socket, request, (int)strlen(request), 0);
+
+	if (nSent < 0)
+	{
+		//发送失败，重试
+		KdPrint(("get block: send() error: %#x, retrying send()\n", nSent));
+
+		close(*Socket);
+
+		*Socket = socket(AF_INET, SOCK_STREAM, 0);
+
+		if (*Socket == -1)
+		{
+			//套接字出错
+			KdPrint(("get block: socket() returned -1\n"));
+			ExFreePool(request);
+			ExFreePool(buffer);
+			IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
+			return IoStatus->Status;
+		}
+
+		toAddr.sin_family = AF_INET;
+		toAddr.sin_port = Port;
+		toAddr.sin_addr.s_addr = Address;
+		//重新连接
+		status = connect(*Socket, (struct sockaddr*)&toAddr, sizeof(toAddr));
+
+		if (status < 0)
+		{
+			//连接状态出错
+			KdPrint(("get block: connect() error: %#x\n", status));
+			ExFreePool(request);
+			ExFreePool(buffer);
+			close(*Socket);
+			*Socket = -1;
+			IoStatus->Status = status;
+			return IoStatus->Status;
+		}
+
+		nSent = send(*Socket, request, (int)strlen(request), 0);
+
+		if (nSent < 0)
+		{
+			//发送失败
+			KdPrint(("get block: send() error: %#x, returning\n", nSent));
+			ExFreePool(request);
+			ExFreePool(buffer);
+			close(*Socket);
+			*Socket = -1;
+			IoStatus->Status = nSent;
+			return IoStatus->Status;
+		}
+	}
+	if (nSent < (int)strlen(request))
+	{
+		//请求没有正确发送
+		KdPrint(("get block: send() did not complete: %d < %d\n", nSent, (int)strlen(request)));
+	}
+	//接收服务器的回复报文
+	nRecv = recv(*Socket, buffer, BUFFER_SIZE, 0);
+
+	if (nRecv <= 0)
+	{
+		if (nRecv == 0)
+		{
+			//服务器连接断开
+			KdPrint(("get block: server disconnected, retrying both send() and recv()\n"));
+		}
+		else
+		{
+			//报文接受出错
+			KdPrint(("get block: recv() error: %#x, retrying both send() and recv()\n", nRecv));
+		}
+
+		
+		close(*Socket);
+
+		*Socket = socket(AF_INET, SOCK_STREAM, 0);
+
+		if (*Socket == -1)
+		{
+			KdPrint(("get block: socket() returned -1\n"));
+			ExFreePool(request);
+			ExFreePool(buffer);
+			IoStatus->Status = STATUS_INSUFFICIENT_RESOURCES;
+			return IoStatus->Status;
+		}
+
+		toAddr.sin_family = AF_INET;
+		toAddr.sin_port = Port;
+		toAddr.sin_addr.s_addr = Address;
+
+		status = connect(*Socket, (struct sockaddr*)&toAddr, sizeof(toAddr));
+
+		if (status < 0)
+		{
+			KdPrint(("get block: connect() error: %#x\n", status));
+			ExFreePool(request);
+			ExFreePool(buffer);
+			close(*Socket);
+			*Socket = -1;
+			IoStatus->Status = status;
+			return IoStatus->Status;
+		}
+
+		nSent = send(*Socket, request, (int)strlen(request), 0);
+
+		if (nSent < 0)
+		{
+			KdPrint(("get block: send() error: %#x\n", nSent));
+			ExFreePool(request);
+			ExFreePool(buffer);
+			close(*Socket);
+			*Socket = -1;
+			IoStatus->Status = nSent;
+			return IoStatus->Status;
+		}
+		if (nSent < (int)strlen(request))
+		{
+			KdPrint(("get block: send() did not complete: %d < %d\n", nSent, (int)strlen(request)));
+		}
+
+		nRecv = recv(*Socket, buffer, BUFFER_SIZE, 0);
+
+		if (nRecv <= 0)
+		{
+			if (nRecv == 0)
+			{
+				KdPrint(("get block: server disconnected, returning\n"));
+			}
+			else
+			{
+				KdPrint(("get block: recv() error: %#x, returning\n", nRecv));
+			}
+			ExFreePool(request);
+			ExFreePool(buffer);
+			close(*Socket);
+			*Socket = -1;
+			IoStatus->Status = nRecv;
+			return IoStatus->Status;
+		}
+	}
+
+
+	//检查接收到的报文
+
+	buffer[BUFFER_SIZE] = '\0';
+
+	if (_strnicmp(buffer, "HTTP/1.1 206 Partial Content", 28))
+	{	
+		//未正确接收对应的块
+		//对应块不存在
+		KdPrint(("get block error: field \'206 Partial Content\' not found\n"));
+		ExFreePool(request);
+		ExFreePool(buffer);
+		close(*Socket);
+		*Socket = -1;
+		IoStatus->Status = STATUS_UNSUCCESSFUL;
+		return IoStatus->Status;
+	}
+
+	pDataPart = strstr(buffer, "\r\n\r\n") + 4;
+
+	if (pDataPart == NULL || pDataPart < buffer || pDataPart > buffer + BUFFER_SIZE)
+	{
+		//接收到的Http响应报文无效
+		KdPrint(("get block error: invalid HTTP response\n"));
+		ExFreePool(request);
+		ExFreePool(buffer);
+		close(*Socket);
+		*Socket = -1;
+		IoStatus->Status = STATUS_UNSUCCESSFUL;
+		return IoStatus->Status;
+	}
+
+	dataLen = nRecv - (unsigned int)(pDataPart - buffer);
+
+	if (dataLen > Length || pDataPart + dataLen > buffer + BUFFER_SIZE)
+	{
+		//收到的数据长度大于要求的长度，或大于缓冲区，长度不合要求
+		//数据无效
+		KdPrint(("get block error: invalid data length in HTTP response\n"));
+		ExFreePool(request);
+		ExFreePool(buffer);
+		close(*Socket);
+		*Socket = -1;
+		IoStatus->Status = STATUS_UNSUCCESSFUL;
+		return IoStatus->Status;
+	}
+
+	if (dataLen > 0)
+	{
+		RtlCopyMemory(
+			SystemBuffer,
+			pDataPart,
+			dataLen
+		);
+	}
+
+	while (dataLen < Length)
+	{
+		//循环接收数据
+		nRecv = recv(*Socket, buffer, ((Length - dataLen) > BUFFER_SIZE) ? BUFFER_SIZE : (Length - dataLen), 0);
+		if (nRecv <= 0)
+		{
+			if (nRecv == 0)
+			{
+				//服务器中途断开连接
+				KdPrint(("get block: server disconnected in receive loop\n"));
+			}
+			else
+			{
+				//接收的数据出错
+				KdPrint(("get block: recv() error in receive loop: %#x\n", nRecv));
+			}
+			close(*Socket);
+			*Socket = -1;
+			break;
+		}
+		if (dataLen + nRecv > Length || nRecv > BUFFER_SIZE)
+		{
+			//接收到不合要求的数据长度
+			KdPrint(("get block: invalid data length in receive loop: %u,%u,%u\n", dataLen, nRecv, Length));
+			close(*Socket);
+			*Socket = -1;
+			break;
+		}
+		RtlCopyMemory(
+			(PVOID)((PUCHAR)SystemBuffer + dataLen),
+			buffer,
+			nRecv
+		);
+		dataLen += nRecv;
+	}
+
+	if (dataLen != Length)
+	{
+		//收到的数据长度不符合预期
+		DbgPrint("get block: received=%u expected=%u\n", dataLen, Length);
+	}
+
+	ExFreePool(request);
+	ExFreePool(buffer);
+	IoStatus->Status = STATUS_SUCCESS;
+	IoStatus->Information = dataLen;
+	return IoStatus->Status;
+}
 
 //
 //读写线程
@@ -778,11 +1293,11 @@ VOID VDiskThread(PVOID Context) {
 				switch (io_stack->Parameters.DeviceIoControl.IoControlCode)
 				{
 				case IOCTL_DISK_CONNECT:
-					irp->IoStatus.Status = HttpDiskConnect(device_object, irp);
+					irp->IoStatus.Status = NetDiskConnect(device_object, irp);
 					break;
 
 				case IOCTL_DISK_DISCONNECT:
-					irp->IoStatus.Status = HttpDiskDisconnect(device_object, irp);
+					irp->IoStatus.Status = NetDiskDisconnect(device_object, irp);
 					break;
 
 				default:
@@ -829,7 +1344,7 @@ VDiskCreateDevice(
 
 	RtlUnicodeStringPrintf(&device_name, DEVICE_NAME_PREFIX L"%u", Number);
 
-	RtlInitUnicodeString(&sddl, _T("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;BU)"));
+	RtlInitUnicodeString(&sddl, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;BU)");
 
 
 	status = IoCreateDeviceSecure(
@@ -951,7 +1466,6 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	//
 	DbgPrint("Sample Disk Driver Running\n");
 
-	NTSTATUS status = STATUS_SUCCESS;
 
 	parameter_path.Length = 0;
 
