@@ -1,21 +1,68 @@
-//#include <vdisk.h>
 #include <ntddk.h>
+#include <ntifs.h>
+#include <ntddvol.h>
+#include <ntddscsi.h>
 #include <ntdddisk.h>
 #include <ntddcdrm.h>
+#include <ntstrsafe.h>
+#include <mountmgr.h>
 #include <ntverp.h>
 #include <wdmsec.h>
 #include <wsk.h>
+#include <tdi.h>
 #include "vdisk.h"
+#include "ksocket.h"
+
+#pragma comment(lib,"ksocket.lib")
 
 
-#define DEVICE_NAME			L"\\Device\\VDisk"		//设备名
-#define SYM_NAME			L"\\??\\VDisk"			//符号连接
+#define DEVICE_NAME_BASE			L"\\Device\\VDisk"		//设备名
+
+#define DEVICE_NAME_PREFIX			DEVICE_NAME_BASE  L"\\VDisk"
+#define SYM_NAME					L"\\??\\VDisk"			//符号连接
+
+#define PARAMETER_KEY				L"\\Parameters"
+
+#define NUMBEROFDEVICES_VALUE		L"NumberOfDevices"
 
 #define TOKEN_SOURCE_LENGTH 8
 
 #define BUFFER_SIZE             (4096 * 4)
 
 #define NET_DISK_POOL_TAG      'ksiD'
+
+HANDLE dir_handle;
+
+//
+//例程声明
+//
+NTSTATUS
+VDiskCreateDevice(
+	IN PDRIVER_OBJECT   DriverObject,
+	IN ULONG            Number,
+	IN DEVICE_TYPE      DeviceType
+);
+
+NTSTATUS
+HttpGetHeader(
+	IN ULONG                Address,
+	IN USHORT               Port,
+	IN PUCHAR               HostName,
+	IN PUCHAR               FileName,
+	OUT PIO_STATUS_BLOCK    IoStatus,
+	OUT PHTTP_HEADER        HttpHeader
+);
+
+NTSTATUS
+HttpGetBlock(
+	IN ULONG                Address,
+	IN USHORT               Port,
+	IN PUCHAR               HostName,
+	IN PUCHAR               FileName,
+	OUT PIO_STATUS_BLOCK    IoStatus,
+	OUT PHTTP_HEADER        HttpHeader
+);
+
 
 
 
@@ -28,247 +75,10 @@ const WSK_CLIENT_DISPATCH WskAppDispatch = {
 WSK_REGISTRATION WskRegistration;
 
 
+typedef struct _HTTP_HEADER {
+	LARGE_INTEGER ContentLength;
+} HTTP_HEADER, * PHTTP_HEADER;
 
-
-//套接字上下文
-typedef struct _WSK_APP_SOCKET_CONTEXT {
-	PWSK_SOCKET Socket;
-} WSK_APP_SOCKET_CONTEXT, * PWSK_APP_SOCKET_CONTEXT;
-
-WSK_APP_SOCKET_CONTEXT socketcontext;
-
-
-//创建新的面向连接套接字
-NTSTATUS
-CreateConnectionSocket(
-	PWSK_PROVIDER_NPI WskProviderNpi,
-	PWSK_APP_SOCKET_CONTEXT SocketContext,
-	PWSK_CLIENT_LISTEN_DISPATCH Dispatch
-	)
-{
-	PIRP Irp;
-	NTSTATUS Status;
-
-	//分配Irp
-	Irp =
-		IoAllocateIrp(
-			1,
-			FALSE
-		);
-	//Irp分配失败
-	if (!Irp)
-	{
-		return STATUS_INSUFFICIENT_RESOURCES;
-	}
-
-	//创建套接字
-	Status =
-		WskProviderNpi->Dispatch->
-		WskSocket(
-			WskProviderNpi->Client,
-			AF_INET,
-			SOCK_STREAM,
-			IPPROTO_TCP,
-			WSK_FLAG_CONNECTION_SOCKET,
-			SocketContext,
-			Dispatch,
-			NULL,
-			NULL,
-			NULL,
-			Irp
-		);
-
-	return Status;
-}
-
-
-
-//捕获WSK提供程序的NPI，并使用NPI创建套接字
-NTSTATUS
-WskAppWorkerRoutine(
-)
-{
-	NTSTATUS Status;
-	WSK_PROVIDER_NPI wskProviderNpi;
-
-	//若WSK子系统没有就绪则等待
-	Status = WskCaptureProviderNPI(
-		&WskRegistration,
-		WSK_INFINITE_WAIT,
-		&wskProviderNpi
-	);
-
-	if (!NT_SUCCESS(Status))
-	{
-		//若NPI无法捕获
-		if (Status == STATUS_NOINTERFACE) {
-			//WSK版本不支持
-			DbgPrint(" WSK application's requested version is not supported\n");
-		}
-		else if (Status == STATUS_DEVICE_NOT_READY) {
-			DbgPrint("WskDeregister was invoked in another thread\n");
-		}
-		else {
-			DbgPrint("Some other unexpected failure has occurred\n");
-		}
-
-		return Status;
-	}
-
-	//获取到NPI，建立套接字
-	Status = CreateConnectionSocket(&wskProviderNpi,&socketcontext,socketcontext.Socket->Dispatch);
-
-	WskReleaseProviderNPI(&WskRegistration);
-	return Status;
-
-}
-
-
-
-//
-//使用WSK传输数据
-//
-NTSTATUS 
-SendData(PWSK_SOCKET Socket, PWSK_BUF DataBuffer)
-{
-	PWSK_PROVIDER_CONNECTION_DISPATCH Dispatch;
-	PIRP Irp;
-	NTSTATUS Status;
-
-	Dispatch = (PWSK_PROVIDER_CONNECTION_DISPATCH)(Socket->Dispatch);
-
-	//分配IRP
-	Irp =
-		IoAllocateIrp(
-			1,
-			FALSE
-		);
-
-	//检查分配是否成功
-	if (!Irp)
-	{
-		return STATUS_INSUFFICIENT_RESOURCES;
-	}
-
-
-	//初始化传输操作
-	Status =
-		Dispatch->WskSend(
-			Socket,
-			DataBuffer,
-			0,
-			Irp
-		);
-
-	//返回WskSend函数的结果
-	return Status;
-}
-
-
-NTSTATUS
-ConnectComplete(
-	PDEVICE_OBJECT DeviceObject,
-	PIRP Irp,
-	PVOID Context
-)
-{
-	UNREFERENCED_PARAMETER(DeviceObject);
-
-	PWSK_SOCKET Socket;
-
-	// Check the result of the connect operation
-	if (Irp->IoStatus.Status == STATUS_SUCCESS)
-	{
-		// Get the socket object from the context
-		Socket = (PWSK_SOCKET)Context;
-	}
-
-	IoFreeIrp(Irp);
-
-	return STATUS_MORE_PROCESSING_REQUIRED;
-}
-
-//使用WskConnect连接远程地址
-NTSTATUS
-ConnectSocket(
-	PWSK_SOCKET Socket,
-	PSOCKADDR RemoteAddress
-)
-{
-	PWSK_PROVIDER_CONNECTION_DISPATCH Dispatch;
-	PIRP Irp;
-	NTSTATUS Status;
-
-	//获得分发指针
-	Dispatch =
-		(PWSK_PROVIDER_CONNECTION_DISPATCH)(Socket->Dispatch);
-
-	//分配IRP
-	Irp =
-		IoAllocateIrp(
-			1,
-			FALSE
-		);
-
-	if (!Irp)
-	{
-		return STATUS_INSUFFICIENT_RESOURCES;
-	}
-
-	IoSetCompletionRoutine(
-		Irp,
-		ConnectComplete,
-		Socket,
-		TRUE,
-		TRUE,
-		TRUE
-	);
-
-	//初始化连接
-	Status =
-		Dispatch->WskConnect(
-			Socket,
-			RemoteAddress,
-			0,
-			Irp
-		);
-
-	return Status;
-}
-
-
-
-
-
-typedef enum _TOKEN_TYPE {
-	TokenPrimary = 1,
-	TokenImpersonation
-} TOKEN_TYPE;
-
-typedef struct _TOKEN_SOURCE {
-	CCHAR   SourceName[TOKEN_SOURCE_LENGTH];
-	LUID    SourceIdentifier;
-} TOKEN_SOURCE, * PTOKEN_SOURCE;
-
-
-
-typedef struct _TOKEN_CONTROL {
-	LUID            TokenId;
-	LUID            AuthenticationId;
-	LUID            ModifiedId;
-	TOKEN_SOURCE    TokenSource;
-} TOKEN_CONTROL, * PTOKEN_CONTROL;
-
-
-//安全性上下文
-typedef struct _SECURITY_CLIENT_CONTEXT {
-	SECURITY_QUALITY_OF_SERVICE SecurityQos;
-	PACCESS_TOKEN               ClientToken;
-	BOOLEAN                     DirectlyAccessClientToken;
-	BOOLEAN                     DirectAccessEffectiveOnly;
-	BOOLEAN                     ServerIsRemote;
-	TOKEN_CONTROL               ClientTokenControl;
-} SECURITY_CLIENT_CONTEXT, * PSECURITY_CLIENT_CONTEXT;
 
 
 
@@ -304,13 +114,14 @@ typedef struct _DEVICE_EXTENSION {
 
 //
 //删除设备
-//
-VOID 
-VDiskDeleteDevice(PDEVICE_OBJECT pdevice) {
+// 
+PDEVICE_OBJECT VDiskDeleteDevice(PDEVICE_OBJECT DeviceObject) {
 	PDEVICE_EXTENSION   device_extension;
 	PDEVICE_OBJECT      next_device_object;
+	ASSERT(DeviceObject = NULL);
+
 	// 得到设备扩展
-	device_extension = (PDEVICE_EXTENSION)pdevice->DeviceExtension;
+	device_extension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
 	// 设置线程终止标志
 	device_extension->terminate_thread = TRUE;
 	// 设置启动事件
@@ -328,7 +139,17 @@ VDiskDeleteDevice(PDEVICE_OBJECT pdevice) {
 		NULL
 	);
 	ObDereferenceObject(device_extension->thread_pointer);
-	IoDeleteDevice(pdevice);
+
+	if (device_extension->device_name.Buffer != NULL)
+	{
+		ExFreePool(device_extension->device_name.Buffer);
+	}
+
+	next_device_object = DeviceObject->NextDevice;
+
+	IoDeleteDevice(DeviceObject);
+
+	return next_device_object;
 }
 
 
@@ -337,16 +158,17 @@ VDiskDeleteDevice(PDEVICE_OBJECT pdevice) {
 //驱动卸载例程
 //
 VOID 
-VDiskUnload(PDRIVER_OBJECT pdriver) {
+VDiskUnload(PDRIVER_OBJECT DriverObject) {
 	DbgPrint("Driver Unloaded\n");
 
+	PDEVICE_OBJECT device_object;
+
+	device_object = DriverObject->DeviceObject;
 	//若设备存在则进行删除
-	if (pdriver->DeviceObject) {
-		VDiskDeleteDevice(pdriver->DeviceObject);
-		UNICODE_STRING symname = { 0 };
-		RtlInitUnicodeString(&symname, L"\\??\\VDisk");
-		IoDeleteSymbolicLink(&symname);
+	while (device_object) {
+		device_object = VDiskDeleteDevice(device_object);
 	}
+	ZwClose(dir_handle);
 }
 
 
@@ -358,6 +180,7 @@ VDiskUnload(PDRIVER_OBJECT pdriver) {
 NTSTATUS 
 VDiskCreateClose(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	//PAGED_CODE();		调试使用的宏
+	UNREFERENCED_PARAMETER(DeviceObject);		//略过未使用的参数
 	irp->IoStatus.Status = STATUS_SUCCESS;
 	irp->IoStatus.Information = FILE_OPENED;
 	IoCompleteRequest(irp, IO_NO_INCREMENT);
@@ -443,8 +266,8 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	//获取设备栈
 	io_stack = IoGetCurrentIrpStackLocation(irp);
 
-	//判断是否加载物理媒介，没有则返回，但排除自定义的加载媒介功能号
-	if (!device_extension->media_in_device && io_stack->Parameters.DeviceIoControl.IoControlCode != IOCTL_FILE_DISK_OPEN_FILE) {
+	//判断是否加载虚拟磁盘
+	if (!device_extension->media_in_device && io_stack->Parameters.DeviceIoControl.IoControlCode != IOCTL_DISK_CONNECT) {
 		irp->IoStatus.Status = STATUS_NO_MEDIA_IN_DEVICE;
 		irp->IoStatus.Information = 0;
 		IoCompleteRequest(irp, IO_NO_INCREMENT);
@@ -460,7 +283,7 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	{
 		if (device_extension->media_in_device)
 		{
-			DbgPrint("HttpDisk: IOCTL_DISK_CONNECT: Media already connected.\n");
+			DbgPrint("IOCTL_DISK_CONNECT: Media already connected.\n");
 
 			status = STATUS_INVALID_DEVICE_REQUEST;
 			irp->IoStatus.Information = 0;
@@ -714,16 +537,157 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 }
 
 
+
+//
+//连接磁盘映像
+//
 NTSTATUS
 NetDiskConnect(IN PDEVICE_OBJECT   DeviceObject,IN PIRP	irp)
 {
+	PDEVICE_EXTENSION       device_extension;
+	PNET_DISK_INFORMATION  http_disk_information;
+	HTTP_HEADER             http_header;
+
+	PAGED_CODE();
+
+	ASSERT(DeviceObject != NULL);
+	ASSERT(irp != NULL);
+
+	device_extension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
+
+	http_disk_information = (PNET_DISK_INFORMATION)irp->AssociatedIrp.SystemBuffer;
+
+	device_extension->address = http_disk_information->Address;
+
+	device_extension->port = http_disk_information->Port;
+
+	device_extension->host_name = ExAllocatePoolWithTag(NonPagedPool, http_disk_information->HostNameLength + 1, NET_DISK_POOL_TAG);
+
+	if (device_extension->host_name == NULL)
+	{
+		irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+		return irp->IoStatus.Status;
+	}
+
+	RtlCopyMemory(
+		device_extension->host_name,
+		http_disk_information->HostName,
+		http_disk_information->HostNameLength
+	);
+
+	device_extension->host_name[http_disk_information->HostNameLength] = '\0';
+
+	device_extension->file_name = ExAllocatePoolWithTag(NonPagedPool, http_disk_information->FileNameLength + 1, NET_DISK_POOL_TAG);
+
+	if (device_extension->file_name == NULL)
+	{
+		if (device_extension->host_name != NULL)
+		{
+			ExFreePool(device_extension->host_name);
+			device_extension->host_name = NULL;
+		}
+
+		irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+		return irp->IoStatus.Status;
+	}
+
+	RtlCopyMemory(
+		device_extension->file_name,
+		http_disk_information->FileName,
+		http_disk_information->FileNameLength
+	);
+
+	device_extension->file_name[http_disk_information->FileNameLength] = '\0';
+
+	HttpGetHeader(
+		device_extension->address,
+		device_extension->port,
+		device_extension->host_name,
+		device_extension->file_name,
+		&irp->IoStatus,
+		&http_header
+	);
+
+	if (!NT_SUCCESS(irp->IoStatus.Status))
+	{
+		DbgPrint("retrying get header\n");
+		HttpGetHeader(
+			device_extension->address,
+			device_extension->port,
+			device_extension->host_name,
+			device_extension->file_name,
+			&irp->IoStatus,
+			&http_header
+		);
+	}
+
+	if (!NT_SUCCESS(irp->IoStatus.Status))
+	{
+		DbgPrint("HttpDisk: get header failed\n");
+
+		if (device_extension->host_name != NULL)
+		{
+			ExFreePool(device_extension->host_name);
+			device_extension->host_name = NULL;
+		}
+
+		if (device_extension->file_name != NULL)
+		{
+			ExFreePool(device_extension->file_name);
+			device_extension->file_name = NULL;
+		}
+
+		return irp->IoStatus.Status;
+	}
+
+	device_extension->file_size.QuadPart = http_header.ContentLength.QuadPart;
+
+	device_extension->media_in_device = TRUE;
+
+	return irp->IoStatus.Status;
 }
 
 
 
+//
+//断开磁盘映像
+//
 NTSTATUS
 NetDiskDisconnect(IN PDEVICE_OBJECT DeviceObject,IN PIRP irp)
 {
+	PDEVICE_EXTENSION device_extension;
+
+	PAGED_CODE();
+
+	ASSERT(DeviceObject != NULL);
+	ASSERT(irp != NULL);
+
+	device_extension = (PDEVICE_EXTENSION)DeviceObject->DeviceExtension;
+
+	device_extension->media_in_device = FALSE;
+
+	if (device_extension->host_name != NULL)
+	{
+		ExFreePool(device_extension->host_name);
+		device_extension->host_name = NULL;
+	}
+
+	if (device_extension->file_name != NULL)
+	{
+		ExFreePool(device_extension->file_name);
+		device_extension->file_name = NULL;
+	}
+
+	if (device_extension->socket != -1)
+	{
+		close(device_extension->socket);
+		device_extension->socket = -1;
+	}
+
+	irp->IoStatus.Status = STATUS_SUCCESS;
+	irp->IoStatus.Information = 0;
+
+	return STATUS_SUCCESS;
 }
 
 	
@@ -739,8 +703,6 @@ VOID VDiskThread(PVOID Context) {
 	PLIST_ENTRY         request;
 	PIRP                irp;
 	PIO_STACK_LOCATION  io_stack;
-	PUCHAR              system_buffer;
-	PUCHAR              buffer;
 
 	ASSERT(Context != NULL);
 
@@ -763,7 +725,7 @@ VOID VDiskThread(PVOID Context) {
 		}
 
 		//利用锁移除链表节点，并处理读写请求
-		while ((request = ExInterlockedRemoveHeadList(&device_extension->list_head, &device_extension->list_lock))!=NULL)
+		while ((request = ExInterlockedRemoveHeadList(&device_extension->list_head, &device_extension->list_lock)) != NULL)
 		{
 			irp = CONTAINING_RECORD(request, IRP, Tail.Overlay.ListEntry);
 
@@ -771,48 +733,320 @@ VOID VDiskThread(PVOID Context) {
 
 			switch (io_stack->MajorFunction)
 			{
-				//使用ZwReadFile读文件
+				//使用KSocket中提供的TDI程序读文件
 			case IRP_MJ_READ:
-				ZwReadFile(device_extension->file_handle, NULL, NULL, NULL, &irp->IoStatus,
-					MmGetSystemAddressForMdlSafe(irp->MdlAddress, NormalPagePriority),
-					io_stack->Parameters.Read.Length, &io_stack->Parameters.Read.ByteOffset, NULL);
+				HttpGetBlock(
+					&device_extension->socket,
+					device_extension->address,
+					device_extension->port,
+					device_extension->host_name,
+					device_extension->file_name,
+					&io_stack->Parameters.Read.ByteOffset,
+					io_stack->Parameters.Read.Length,
+					&irp->IoStatus,
+					MmGetSystemAddressForMdlSafe(irp->MdlAddress, NormalPagePriority)
+				);
+				if (!NT_SUCCESS(irp->IoStatus.Status))
+				{
+					DbgPrint("VDisk: retrying get block: offset=%I64u length=%u\n", io_stack->Parameters.Read.ByteOffset.QuadPart, io_stack->Parameters.Read.Length);
+					HttpGetBlock(
+						&device_extension->socket,
+						device_extension->address,
+						device_extension->port,
+						device_extension->host_name,
+						device_extension->file_name,
+						&io_stack->Parameters.Read.ByteOffset,
+						io_stack->Parameters.Read.Length,
+						&irp->IoStatus,
+						MmGetSystemAddressForMdlSafe(irp->MdlAddress, NormalPagePriority)
+					);
+					if (!NT_SUCCESS(irp->IoStatus.Status))
+					{
+						DbgPrint("VDisk: get block failed\n");
+					}
+				}
 				break;
+
 
 
 			case IRP_MJ_WRITE:
-				if ((io_stack->Parameters.Write.ByteOffset.QuadPart + io_stack->Parameters.Write.Length) >
-					device_extension->file_information.AllocationSize.QuadPart)
-				{
-					irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-					irp->IoStatus.Information = 0;
-					break;
-				}
-				ZwWriteFile(device_extension->file_handle, NULL, NULL, NULL,
-					&irp->IoStatus, MmGetSystemAddressForMdlSafe(irp->MdlAddress, NormalPagePriority),
-					io_stack->Parameters.Write.Length, &io_stack->Parameters.Write.ByteOffset, NULL);
+				irp->IoStatus.Status = STATUS_MEDIA_WRITE_PROTECTED;
+				irp->IoStatus.Information = 0;
 				break;
 
+			case IRP_MJ_DEVICE_CONTROL:
+				switch (io_stack->Parameters.DeviceIoControl.IoControlCode)
+				{
+				case IOCTL_DISK_CONNECT:
+					irp->IoStatus.Status = HttpDiskConnect(device_object, irp);
+					break;
 
-			default:
-				irp->IoStatus.Status = STATUS_DRIVER_INTERNAL_ERROR;
+				case IOCTL_DISK_DISCONNECT:
+					irp->IoStatus.Status = HttpDiskDisconnect(device_object, irp);
+					break;
+
+				default:
+					irp->IoStatus.Status = STATUS_DRIVER_INTERNAL_ERROR;
+				}
+				break;
+
+				//最后完成请求
+				IoCompleteRequest(irp, (CCHAR)(NT_SUCCESS(irp->IoStatus.Status) ? IO_DISK_INCREMENT : IO_NO_INCREMENT));
 			}
-
-			//最后完成请求
-			IoCompleteRequest(irp, (CCHAR)(NT_SUCCESS(irp->IoStatus.Status) ? IO_DISK_INCREMENT : IO_NO_INCREMENT));
 		}
 	}
 }
 
+
+
+
+//
+//创建设备
+//
+VDiskCreateDevice(
+	IN PDRIVER_OBJECT   DriverObject,
+	IN ULONG            Number,
+	IN DEVICE_TYPE      DeviceType
+)
+{
+	UNICODE_STRING		device_name;
+	NTSTATUS			status;
+	PDEVICE_OBJECT		device_object;
+	PDEVICE_EXTENSION	device_extension;
+	HANDLE				thread_handle;
+	UNICODE_STRING		sddl;
+
+	ASSERT(DriverObject != NULL);
+
+	device_name.Buffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, MAXIMUM_FILENAME_LENGTH * 2, NET_DISK_POOL_TAG);
+
+	if (device_name.Buffer == NULL) {
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	device_name.Length = 0;
+	device_name.MaximumLength = MAXIMUM_FILENAME_LENGTH * 2;
+
+	RtlUnicodeStringPrintf(&device_name, DEVICE_NAME_PREFIX L"%u", Number);
+
+	RtlInitUnicodeString(&sddl, _T("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;BU)"));
+
+
+	status = IoCreateDeviceSecure(
+		DriverObject,
+		sizeof(DEVICE_EXTENSION),
+		&device_name,
+		DeviceType,
+		0,
+		FALSE,
+		&sddl,
+		NULL,
+		&device_object
+	);
+	if (!NT_SUCCESS(status))
+	{
+		ExFreePool(device_name.Buffer);
+		return status;
+	}
+	device_object->Flags |= DO_DIRECT_IO;
+
+	device_extension = (PDEVICE_EXTENSION)device_object->DeviceExtension;
+
+	device_extension->media_in_device = FALSE;
+
+	device_extension->device_name.Length = device_name.Length;
+	device_extension->device_name.MaximumLength = device_name.MaximumLength;
+	device_extension->device_name.Buffer = device_name.Buffer;
+	device_extension->device_number = Number;
+	device_extension->device_type = DeviceType;
+
+	device_extension->host_name = NULL;
+
+	device_extension->file_name = NULL;
+
+	device_extension->socket = -1;
+
+	device_object->Characteristics |= FILE_READ_ONLY_DEVICE;
+
+	InitializeListHead(&device_extension->list_head);
+
+	KeInitializeSpinLock(&device_extension->list_lock);
+
+	KeInitializeEvent(
+		&device_extension->request_event,
+		SynchronizationEvent,
+		FALSE
+	);
+
+	device_extension->terminate_thread = FALSE;
+
+	status = PsCreateSystemThread(
+		&thread_handle,
+		(ACCESS_MASK)0L,
+		NULL,
+		NULL,
+		NULL,
+		VDiskThread,
+		device_object
+	);
+	if (!NT_SUCCESS(status))
+	{
+		IoDeleteDevice(device_object);
+		ExFreePool(device_name.Buffer);
+		return status;
+	}
+
+	status = ObReferenceObjectByHandle(
+		thread_handle,
+		THREAD_ALL_ACCESS,
+		NULL,
+		KernelMode,
+		&device_extension->thread_pointer,
+		NULL
+	);
+
+	if (!NT_SUCCESS(status))
+	{
+		ZwClose(thread_handle);
+
+		device_extension->terminate_thread = TRUE;
+
+		KeSetEvent(
+			&device_extension->request_event,
+			(KPRIORITY)0,
+			FALSE
+		);
+
+		IoDeleteDevice(device_object);
+
+		ExFreePool(device_name.Buffer);
+
+		return status;
+	}
+
+	ZwClose(thread_handle);
+
+	return STATUS_SUCCESS;
+
+}
+
+
+
+
+
 NTSTATUS
 DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 {
+	UNICODE_STRING              parameter_path;
+	RTL_QUERY_REGISTRY_TABLE    query_table[2];
+	ULONG                       n_devices;
+	NTSTATUS                    status;
+	UNICODE_STRING              device_dir_name;
+	OBJECT_ATTRIBUTES           object_attributes;
+	ULONG                       n;
+	USHORT                      n_created_devices;
 
-	NTSTATUS status = STATUS_SUCCESS;
-	WSK_CLIENT_NPI wskClientNpi;
 	//
 	//驱动开始运行
 	//
 	DbgPrint("Sample Disk Driver Running\n");
+
+	NTSTATUS status = STATUS_SUCCESS;
+
+	parameter_path.Length = 0;
+
+	parameter_path.MaximumLength = RegistryPath->Length + sizeof(PARAMETER_KEY);
+
+	parameter_path.Buffer = (PWSTR)ExAllocatePoolWithTag(PagedPool, parameter_path.MaximumLength, NET_DISK_POOL_TAG);
+
+	if (parameter_path.Buffer == NULL)
+	{
+		return STATUS_INSUFFICIENT_RESOURCES;		//缓冲区资源不足
+	}
+
+	RtlCopyUnicodeString(&parameter_path, RegistryPath);
+
+	RtlAppendUnicodeToString(&parameter_path, PARAMETER_KEY);
+
+	RtlZeroMemory(&query_table[0], sizeof(query_table));
+
+	query_table[0].Flags = RTL_QUERY_REGISTRY_DIRECT | RTL_QUERY_REGISTRY_REQUIRED;
+	query_table[0].Name = NUMBEROFDEVICES_VALUE;
+	query_table[0].EntryContext = &n_devices;
+
+	status = RtlQueryRegistryValues(
+		RTL_REGISTRY_ABSOLUTE,
+		parameter_path.Buffer,
+		&query_table[0],
+		NULL,
+		NULL
+	);
+
+	ExFreePool(parameter_path.Buffer);
+
+	if (!NT_SUCCESS(status))
+	{
+		DbgPrint("Query registry failed, using default values.\n");
+		n_devices = 4;
+	}
+
+	RtlInitUnicodeString(&device_dir_name, DEVICE_NAME_BASE);
+
+	InitializeObjectAttributes(
+		&object_attributes,
+		&device_dir_name,
+		OBJ_PERMANENT,
+		NULL,
+		NULL
+	);
+
+	status = ZwCreateDirectoryObject(
+		&dir_handle,
+		DIRECTORY_ALL_ACCESS,
+		&object_attributes
+	);
+
+	if (!NT_SUCCESS(status))
+	{
+		return status;
+	}
+
+	ZwMakeTemporaryObject(dir_handle);
+
+	for (n = 0, n_created_devices = 0; n < n_devices; n++)
+	{
+		status = VDiskCreateDevice(DriverObject, n, FILE_DEVICE_DISK);
+
+		if (NT_SUCCESS(status))
+		{
+			n_created_devices++;
+		}
+	}
+
+	for (n = 0; n < n_devices; n++)
+	{
+		status = VDiskCreateDevice(DriverObject, n, FILE_DEVICE_CD_ROM);
+
+		if (NT_SUCCESS(status))
+		{
+			n_created_devices++;
+		}
+	}
+
+	if (n_created_devices == 0)
+	{
+		ZwClose(dir_handle);
+		return status;
+	}
+
+
+
+
+
+	/*
+
+
+	WSK_CLIENT_NPI wskClientNpi;
 
 	//
 	//命名
@@ -820,7 +1054,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 	UNICODE_STRING devicename = { 0 };
 	RtlInitUnicodeString(&devicename, DEVICE_NAME);
 
-
+	WSK_CLIENT_NPI wskClientNpi;
 	//
 	//注册wsk应用程序
 	//
@@ -885,9 +1119,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 		return status;
 	}
 
-	
-
-
+	*/
 	//
 	//进行例程分发
 	//
