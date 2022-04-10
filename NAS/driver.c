@@ -16,10 +16,6 @@
 #pragma comment(lib,"ksocket.lib")
 
 
-#define DEVICE_NAME_BASE			L"\\Device\\VDisk"		//设备名
-
-#define DEVICE_NAME_PREFIX			DEVICE_NAME_BASE  L"\\VDisk"
-#define SYM_NAME					L"\\??\\VDisk"			//符号连接
 
 #define PARAMETER_KEY				L"\\Parameters"
 
