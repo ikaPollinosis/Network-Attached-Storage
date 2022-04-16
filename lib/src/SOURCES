@@ -1,0 +1,8 @@
+TARGETNAME=ksocket
+TARGETPATH=..\obj\$(DDKBUILDENV)
+TARGETTYPE=LIBRARY
+INCLUDES=$(DDK_INC_PATH);..\inc
+SOURCES=endian.c    \
+        inet.c      \
+        ksocket.c   \
+        tdi.c
