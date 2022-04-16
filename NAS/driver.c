@@ -1,19 +1,13 @@
-#include <ntddk.h>
 #include <ntifs.h>
-#include <ntddvol.h>
-#include <ntddscsi.h>
 #include <ntdddisk.h>
 #include <ntddcdrm.h>
 #include <ntstrsafe.h>
-#include <mountmgr.h>
-#include <ntverp.h>
 #include <wdmsec.h>
-#include <wsk.h>
-#include <tdi.h>
+#include <mountmgr.h>
+#include <ntddvol.h>
+#include <ntddscsi.h>
 #include "vdisk.h"
 #include "ksocket.h"
-
-#pragma comment(lib,"ksocket.lib")
 
 
 
@@ -29,7 +23,17 @@
 
 HANDLE dir_handle;
 
-__int64 __cdecl _atoi64(const char*);
+__int64 __cdecl _atoi64(const char *);
+
+#pragma code_seg("INIT")
+
+
+typedef struct _NET_HEADER {
+	LARGE_INTEGER ContentLength;
+} NET_HEADER, * PNET_HEADER;
+
+
+
 
 //
 //例程声明
@@ -41,6 +45,8 @@ VDiskCreateDevice(
 	IN DEVICE_TYPE      DeviceType
 );
 
+
+
 NTSTATUS
 HttpGetHeader(
 	IN ULONG                Address,
@@ -48,7 +54,7 @@ HttpGetHeader(
 	IN PUCHAR               HostName,
 	IN PUCHAR               FileName,
 	OUT PIO_STATUS_BLOCK    IoStatus,
-	OUT PHTTP_HEADER        HttpHeader
+	OUT PNET_HEADER         HttpHeader
 );
 
 NTSTATUS
@@ -66,17 +72,6 @@ HttpGetBlock(
 
 
 
-typedef struct _HTTP_HEADER {
-	LARGE_INTEGER ContentLength;
-} HTTP_HEADER, * PHTTP_HEADER;
-
-
-
-
-typedef struct _NET_HEADER {
-	LARGE_INTEGER ContentLength;
-} NET_HEADER, * PNET_HEADER;
-
 
 //设备扩展
 typedef struct _DEVICE_EXTENSION {
@@ -86,7 +81,7 @@ typedef struct _DEVICE_EXTENSION {
 	BOOLEAN							read_only;					//只读
 	PSECURITY_CONTEXT_TRACKING_MODE security_client_context;	//安全性上下文
 	LIST_ENTRY						list_head;					//irp链表头
-	KSPIN_LOCK						list_lock;					//链表读写同步锁
+	KSPIN_LOCK						list_lock;					//链表读写自旋锁
 	KEVENT							request_event;				//处理链表请求事件
 	PVOID							thread_pointer;				//线程指针
 	BOOLEAN							terminate_thread;			//是否终止线程
@@ -212,11 +207,15 @@ VDiskReadWrite(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	}
 
 	IoMarkIrpPending(irp);
+	
+	
 
+	// 写入链表
 	ExInterlockedInsertTailList(&device_extension->list_head,
 		&irp->Tail.Overlay.ListEntry,
+		// 链表加锁，插入节点并解锁
 		&device_extension->list_lock
-	);	//写入链表
+	);
 
 	//线程循环运行
 	KeSetEvent(
@@ -290,9 +289,12 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 
 		IoMarkIrpPending(irp);
 
+
+		// 写入链表
 		ExInterlockedInsertTailList(
 			&device_extension->list_head,
 			&irp->Tail.Overlay.ListEntry,
+			// 链表加锁，插入节点并解锁
 			&device_extension->list_lock
 		);
 
@@ -311,9 +313,12 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 	{
 		IoMarkIrpPending(irp);
 
+
+		// 写入链表
 		ExInterlockedInsertTailList(
 			&device_extension->list_head,
 			&irp->Tail.Overlay.ListEntry,
+			// 链表加锁，插入节点并解锁
 			&device_extension->list_lock
 		);
 
@@ -514,6 +519,15 @@ NTSTATUS VDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 		}
 	}
 
+	if (status != STATUS_PENDING)
+	{
+		irp->IoStatus.Status = status;
+
+		IoCompleteRequest(irp, IO_NO_INCREMENT);
+	}
+
+	return status;
+
 }
 
 
@@ -526,7 +540,7 @@ NetDiskConnect(IN PDEVICE_OBJECT   DeviceObject,IN PIRP	irp)
 {
 	PDEVICE_EXTENSION       device_extension;
 	PNET_DISK_INFORMATION  http_disk_information;
-	HTTP_HEADER             http_header;
+	NET_HEADER             http_header;
 
 	PAGED_CODE();
 
@@ -676,7 +690,7 @@ NetDiskDisconnect(IN PDEVICE_OBJECT DeviceObject,IN PIRP irp)
 
 	
 //
-//获取资源信息
+//使用Http协议获取资源信息
 //
 NTSTATUS
 HttpGetHeader(
@@ -685,7 +699,7 @@ HttpGetHeader(
 	IN PUCHAR               HostName,
 	IN PUCHAR               FileName,
 	OUT PIO_STATUS_BLOCK    IoStatus,
-	OUT PHTTP_HEADER        HttpHeader
+	OUT PNET_HEADER        HttpHeader
 )
 {
 	INT_PTR             kSocket;
@@ -862,7 +876,7 @@ HttpGetHeader(
 
 
 //
-//获取磁盘块
+//使用Http协议获取磁盘块
 //
 NTSTATUS
 HttpGetBlock(
@@ -1235,7 +1249,7 @@ VOID VDiskThread(PVOID Context) {
 			PsTerminateSystemThread(STATUS_SUCCESS);
 		}
 
-		//利用锁移除链表节点，并处理读写请求
+		//关闭自旋锁，移除链表节点，再打开自旋锁并处理读写请求
 		while ((request = ExInterlockedRemoveHeadList(&device_extension->list_head, &device_extension->list_lock)) != NULL)
 		{
 			irp = CONTAINING_RECORD(request, IRP, Tail.Overlay.ListEntry);
@@ -1379,8 +1393,10 @@ VDiskCreateDevice(
 
 	device_object->Characteristics |= FILE_READ_ONLY_DEVICE;
 
+	// 初始化中断请求链表头
 	InitializeListHead(&device_extension->list_head);
 
+	// 初始化自旋锁
 	KeInitializeSpinLock(&device_extension->list_lock);
 
 	KeInitializeEvent(
@@ -1500,7 +1516,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 		n_devices = 4;
 	}
 
-	RtlInitUnicodeString(&device_dir_name, DEVICE_NAME_BASE);
+	RtlInitUnicodeString(&device_dir_name, DEVICE_DIR_NAME);
 
 	InitializeObjectAttributes(
 		&object_attributes,
@@ -1549,87 +1565,6 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 		return status;
 	}
 
-
-
-
-
-	/*
-
-
-	WSK_CLIENT_NPI wskClientNpi;
-
-	//
-	//命名
-	//
-	UNICODE_STRING devicename = { 0 };
-	RtlInitUnicodeString(&devicename, DEVICE_NAME);
-
-	WSK_CLIENT_NPI wskClientNpi;
-	//
-	//注册wsk应用程序
-	//
-	wskClientNpi.ClientContext = NULL;
-	wskClientNpi.Dispatch = &WskAppDispatch;
-	status = WskRegister(&wskClientNpi, &WskRegistration);
-	if (!NT_SUCCESS(status)) {
-		DbgPrint("Register Wsk Failed:%x\n", status);
-		return status;
-	}
-
-	//
-	//创建套接字
-	//
-	status = WskAppWorkerRoutine();
-	if (!NT_SUCCESS(status)) {
-		DbgPrint("Create Socket Failed:%x\n", status);
-		return status;
-	}
-
-
-	//
-	//与目标建立连接
-	//
-	SOCKADDR_IN addr;
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(800);
-	addr.sin_addr.s_addr = inet_addr("192.168.43.59");
-
-	status = ConnectSocket(socketcontext.Socket, (PSOCKADDR)&addr);
-	if (!NT_SUCCESS(status)) {
-		DbgPrint("Connect to Server Failed:%x\n", status);
-		return status;
-	}
-
-	//
-	//创建设备
-	//
-	PDEVICE_OBJECT pdevice = NULL;
-	status = IoCreateDevice(DriverObject, sizeof(DEVICE_EXTENSION),
-		&devicename, FILE_DEVICE_DISK, 0, FALSE, &pdevice);
-	if (!NT_SUCCESS(status)) {
-		DbgPrint("Create Device Failed:%x\n", status);
-		return status;
-	}
-
-	//
-	//生成系统线程
-	//
-	HANDLE thread_handle;
-	status = PsCreateSystemThread(&thread_handle, (ACCESS_MASK)0L, NULL, NULL, NULL, VDiskThread, pdevice);
-
-	//
-	//创建符号连接
-	//
-	UNICODE_STRING symname = { 0 };
-	RtlInitUnicodeString(&symname, SYM_NAME);
-	status = IoCreateSymbolicLink(&symname, &devicename);
-	if (!NT_SUCCESS(status)) {
-		DbgPrint("Create SymbolLink Failed:%x\n", status);
-		IoDeleteDevice(pdevice);
-		return status;
-	}
-
-	*/
 	//
 	//进行例程分发
 	//

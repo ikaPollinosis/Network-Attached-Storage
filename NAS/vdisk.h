@@ -6,9 +6,24 @@
 #define IOCTL_DISK_CONNECT          CTL_CODE(FILE_DEVICE_DISK, 0x803, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define IOCTL_DISK_DISCONNECT       CTL_CODE(FILE_DEVICE_DISK, 0x804, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 
-#define DEVICE_NAME_BASE			L"\\Device\\VDisk"		
-#define DEVICE_NAME_PREFIX			DEVICE_NAME_BASE  L"\\VDisk"
-#define SYM_NAME					L"\\??\\VDisk"			
+#ifndef HTTPDISK_H
+#define HTTPDISK_H
+
+#ifndef __T
+#ifdef _NTDDK_
+#define __T(x)  L ## x
+#else
+#define __T(x)  x
+#endif
+#endif
+
+#ifndef _T
+#define _T(x)   __T(x)
+#endif
+
+#define DEVICE_BASE_NAME    _T("\\VDisk")
+#define DEVICE_DIR_NAME     _T("\\Device")      DEVICE_BASE_NAME
+#define DEVICE_NAME_PREFIX  DEVICE_DIR_NAME     _T("\\Disk")
 
 typedef struct _OPEN_FILE_INFORMATION {
     LARGE_INTEGER   FileSize;
@@ -28,3 +43,5 @@ typedef struct _NET_DISK_INFORMATION {
     USHORT  FileNameLength;
     CHAR    FileName[1];
 } NET_DISK_INFORMATION, * PNET_DISK_INFORMATION;
+
+#endif

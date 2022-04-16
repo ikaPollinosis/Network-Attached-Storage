@@ -22,7 +22,7 @@
     <ClInclude Include="vdisk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ksocket.h">
+    <ClInclude Include="..\lib\inc\ksocket.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

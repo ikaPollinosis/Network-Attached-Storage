@@ -166,12 +166,12 @@
     </ClCompile>
     <ClCompile>
       <TreatWarningAsError>false</TreatWarningAsError>
-      <AdditionalIncludeDirectories>C:\Users\ika\source\repos\NAS\NAS;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\ika\source\repos\NAS\lib\inc;C:\Users\ika\source\repos\NAS\NAS;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <TreatLinkerWarningAsErrors>false</TreatLinkerWarningAsErrors>
-      <AdditionalLibraryDirectories>C:\Users\ika\source\repos\NAS\NAS;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ksocket.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>C:\Users\ika\source\repos\NAS\lib\Debug\x64;C:\Users\ika\source\repos\NAS\NAS;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>ksocket.lib;%(AdditionalDependencies);$(DDK_LIB_PATH)\libcntpr.lib;$(DDK_LIB_PATH)\wdmsec.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -186,7 +186,7 @@
     <ClCompile Include="driver.c" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="ksocket.h" />
+    <ClInclude Include="..\lib\inc\ksocket.h" />
     <ClInclude Include="vdisk.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
