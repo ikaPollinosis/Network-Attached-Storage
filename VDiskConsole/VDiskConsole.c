@@ -35,7 +35,7 @@ int DiskMount(int DeviceNumber,PNET_DISK_INFORMATION DiskInformation){
 		return -1;
 	}
 
-	sprintf(DeviceName, DEVICE_NAME_PREFIX L"%u", DeviceNumber);
+	sprintf(DeviceName, DEVICE_NAME_PREFIX "%u", DeviceNumber);
 
 	// 创建符号链接，生成盘符
 	if (!DefineDosDevice(
@@ -110,7 +110,6 @@ int DiskUmount(char DriveLetter)
 	// 设备句柄无效
 	if (Device == INVALID_HANDLE_VALUE)
 	{
-		PrintLastError(&VolumeName[4]);
 		return -1;
 	}
 
@@ -274,7 +273,6 @@ int main(int argc, char* argv[]) {
 
 			if (!Hostent)
 			{
-				PrintLastError(Url);
 				return -1;
 			}
 

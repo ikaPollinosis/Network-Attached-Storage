@@ -20,7 +20,7 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="vdisk.h">
+    <ClInclude Include="..\NAS\vdisk.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
